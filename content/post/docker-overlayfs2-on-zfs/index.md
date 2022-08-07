@@ -373,7 +373,11 @@ Let's turn our focus to the Linux kernel.
 
 #### `DCACHE_OP_REVALIDATE` flag is set
 
-If a `dentry` has `d_revalidate` set to not `NULL`, which is the case wil ZFS, kernel will mark `DCACHE_OP_REVALIDATE` in its `d_flags`. A `d_flags` is just flags to tell what operations that this `dentry` supports, and `DCACHE_OP_REVALIDATE` means it supports `d_revalidate` operations.
+If a `dentry` has `d_revalidate` set to not `NULL`, which is the case with ZFS, kernel will mark `DCACHE_OP_REVALIDATE` in its `d_flags`. A `d_flags` is just flags to tell what operations that this `dentry` supports, and `DCACHE_OP_REVALIDATE` means it supports `d_revalidate` operations.
+
+Now in our case, ZFS uses `d_revalidate`, so our `d_flags` have a `DCACHE_OP_REVALIDATE` present.
+
+*Keep this in mind.* This flag will cause `overlayfs` to identify it as a remote fs. You will see why.
 
 ```c
 // File: fs/dcache.c
@@ -408,8 +412,6 @@ void d_set_d_op(struct dentry *dentry, const struct dentry_operations *op)
 }
 EXPORT_SYMBOL(d_set_d_op);
 ```
-
-Now in our case, ZFS uses `d_revalidate`, so our `d_flags` have a `DCACHE_OP_REVALIDATE` present. *Keep this in mind.*
 
 #### Mounting process of `overlayfs`
 
@@ -579,7 +581,7 @@ sudo zfs destroy rpool/ROOT/ubuntu_uzcb39/var/lib/docker -R -r
 sudo zfs create -sV 64G rpool/ROOT/ubuntu_uzcb39/var/lib/docker
 # rpool/ROOT/ubuntu_uzcb39/var/lib/docker is where the dataset is. Note that this will not be mounted to /var/lib/docker, which is different from the one above.
 # -V creates a zvol
-# -s makes it sparse, i.e, dynamically expands instead of taking all defined spaces
+# -s makes it sparse, i.e, dynamically expands instead of taking all defined space
 ```
 
 **Format the zvol**. ZFS Volumes are identified as devices in the `/dev/zvol/{dsk,rdsk}/pool` directory. Since we created a block device, let's format it to `ext4`.

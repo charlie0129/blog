@@ -3,3 +3,4 @@
 *.lock
 public
 resources
+assets/jsconfig.json
