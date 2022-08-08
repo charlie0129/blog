@@ -21,6 +21,8 @@ Outline:
   - Why ZFS is identified as a remote filesystem
 - How to actually solve the problem
 
+We will dive into the source code of OpenZFS and Linux kernel to find out.
+
 ## Background
 
 ### What is ZFS
@@ -264,7 +266,7 @@ So there is not much to optimize in  `zfs` storage drivers. It is the actual zfs
 
 2. just get rid of `zfs` storage driver
 
-Of course, you can also grab another disk in `ext4` as use it directly. But I only have `zfs`-formatted disks, so I only the above two options.
+Of course, you can also grab another disk in `ext4` as use `overlayfs` on top of it. But I only have `zfs`-formatted disks, so I only have the above two options.
 
 The first one "optimize ZFS mount times" isn't really an option. Currently, I don't have the expertise or time to work on OpenZFS.
 
@@ -367,9 +369,9 @@ dentry_operations_t zpl_dentry_operations = {
 
 But how is having `d_revalidate` set to not `NULL` will make `overlayfs` refuse to work?
 
-### How `overlayfs` refuses `d_revalidate` enabled fs
+### How `overlayfs` refuses `d_revalidate`-enabled fs
 
-Let's turn our focus to the Linux kernel.
+To understand how and why How `overlayfs` refuses `d_revalidate`-enabled fs, let's turn our focus to the Linux kernel.
 
 #### `DCACHE_OP_REVALIDATE` flag is set
 
@@ -553,7 +555,7 @@ As I said earlier, "Simply put, that's not possible (***directly***).", it turns
 
 Note that it is a BLOCK DEVICE. This is really important.
 
-Since it is a block device (you can think of it as a dedicated hard drive), we can use it as a Swap device, iSCSI target, and in this case, a block device hold a `ext4` partitation and put `overlayfs` on.
+Since it is a block device (you can think of it as a dedicated hard drive), we can use it as a Swap device, iSCSI target, and in this case, a block device holding a `ext4` partitation to put `overlayfs` on.
 
 ## Solve problem
 
@@ -591,7 +593,7 @@ sudo zfs create -sV 64G rpool/ROOT/ubuntu_uzcb39/var/lib/docker
 **Mount the `ext4` partitation to `/var/lib/docker`.**
 
 ```shell
-sudo mkdir-p  /var/lib/docker
+sudo mkdir -p /var/lib/docker
 sudo mount /dev/zvol/rpool/ROOT/ubuntu_uzcb39/var/lib/docker /var/lib/docker
 ```
 
@@ -603,7 +605,20 @@ df -hT
 # Great!
 ```
 
-**Make changes persistent.** Make the zvol is automatically mounted to `/var/lib/docker`.
+**Start Docker back up and check status.**
+
+```shell
+sudo systemctl start docker
+docker info
+# We are using overlay2 now!
+# > Storage Driver: overlay2
+# > Backing Filesystem: extfs
+# > Supports d_type: true
+# > Native Overlay Diff: true
+# > userxattr: false
+```
+
+**Make changes persistent.** Make sure the zvol is automatically mounted to `/var/lib/docker`.
 
 ```shell
 sudo vim /etc/fstab
