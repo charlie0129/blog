@@ -21,7 +21,7 @@ Outline:
   - Why ZFS is identified as a remote filesystem
 - How to actually solve the problem
 
-We will dive into the source code of OpenZFS and Linux kernel to find out.
+We will dive into the source code of [moby](https://github.com/moby/moby), [OpenZFS](https://github.com/openzfs/zfs), and Linux [kernel](https://github.com/torvalds/linux) to find out.
 
 ## Background
 
