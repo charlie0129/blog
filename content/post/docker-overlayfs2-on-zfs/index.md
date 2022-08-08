@@ -31,7 +31,7 @@ Described as *The last word in filesystems*, ZFS is scalable, and includes exten
 
 By saying ZFS, I am referring to OpenZFS on Linux and FreeBSD: [OpenZFS Documentation](https://openzfs.github.io/openzfs-docs/index.html)
 
-ZFS is a great and sophisticated filesystem, really robust and stable. It never failed my expectations. I personally use ZFS on my personal devices, whenever possible, e.g. laptops (Ubuntu Desktop - for its built-in support for ZFS), NAS (TrueNAS SCALE), and servers (Ubuntu Server).
+ZFS is a great and sophisticated filesystem, really robust and stable. It never failed my expectations. I personally use ZFS on my personal devices, whenever possible, e.g. laptops (Ubuntu Desktop - for its built-in support for ZFS), NAS (TrueNAS SCALE), and servers (Proxmox VE and Ubuntu Server).
 
 ### What is a Docker storage driver
 
@@ -367,7 +367,7 @@ dentry_operations_t zpl_dentry_operations = {
 };
 ```
 
-But how is having `d_revalidate` set to not `NULL` will make `overlayfs` refuse to work?
+But why is having `d_revalidate` set to not `NULL` will make `overlayfs` refuse to work?
 
 ### How `overlayfs` refuses `d_revalidate`-enabled fs
 
@@ -379,7 +379,7 @@ If a `dentry` has `d_revalidate` set to not `NULL`, which is the case with ZFS, 
 
 Now in our case, ZFS uses `d_revalidate`, so our `d_flags` have a `DCACHE_OP_REVALIDATE` present.
 
-*Keep this in mind.* This flag will cause `overlayfs` to identify it as a remote fs. You will see why.
+*Keep this in mind.* This flag will cause `overlayfs` to identify it as a remote fs. You will see why later.
 
 ```c
 // File: fs/dcache.c
@@ -525,7 +525,7 @@ static int ovl_make_workdir(struct super_block *sb, struct ovl_fs *ofs,
 }
 ```
 
-In `ovl_dentry_remote`, it directly marks `dentry` which has `DCACHE_OP_REVALIDATE` flags as remote, thus rejecting it. Remember what we said before? ZFS sets this flag.
+In `ovl_dentry_remote`, it directly marks `dentry` which has `DCACHE_OP_REVALIDATE` flags (Remember what we said before? ZFS sets this flag.) as remote, and thus the code above will go into the if-condition, then rejecting it.
 
 ```c
 // File: fs/overlayfs/super.c
@@ -541,25 +541,25 @@ Now everything comes together. Ah, this is why having `d_revalidate` set to not 
 
 
 
-There is  PRs in OpenZFS to fix this problem: https://github.com/openzfs/zfs/pull/9600 , https://github.com/openzfs/zfs/pull/9414 . But currently they are held and I don't the expertise or time to work on it either.
+There is  PRs in OpenZFS to fix this problem: https://github.com/openzfs/zfs/pull/9600 , https://github.com/openzfs/zfs/pull/9414 . But currently they are held and I don't the expertise or time to work on it either. Hopefully wish I can pick up that PR and fix it (if possible).
 
 ## Final solution
 
 So, the only option left is not possible now. Is there something we can do?
 
-As I said earlier, "Simply put, that's not possible (***directly***).", it turns out, there is still an *indirect* way -- **ZFS Volumes**.
+As I said earlier, "Simply put, that's not possible (***directly***)". Well, it turns out, there is still an *indirect* way -- **ZFS Volumes**. Let's see what Oracle says:
 
 > A ZFS volume is a dataset that represents **a block device**.
 >
 > *Excerpt from: https://docs.oracle.com/cd/E19253-01/819-5461/gaypf/index.html*
 
-Note that it is a BLOCK DEVICE. This is really important.
+Note that it is a *block device*. This is really important, which means we can treat it like a conventional hard drive and do whatever we want on ZFS datasets!
 
-Since it is a block device (you can think of it as a dedicated hard drive), we can use it as a Swap device, iSCSI target, and in this case, a block device holding a `ext4` partitation to put `overlayfs` on.
+Since it is a block device, we can use it as a Swap device, iSCSI target, and in this case, a block device holding a `ext4` partitation to put `overlayfs` on.
 
 ## Solve problem
 
-Finally! We now decide to use ZFS Volumes (zvol) to hold our `overlayfs` , i.e., `overlayfs` on top of `ext4` on top of `zvol` on top of ZFS filesystem.
+Finally! We now decide to use ZFS Volumes (zvol) to hold our `overlayfs` , i.e., `overlayfs` on top of `ext4` on top of `zvol` on top of ZFS datasets. (Well, it is a bit complex. But trust me, even with so many fs layers, the performance is still wayyyy higher than Docker's `zfs` driver.)
 
 Let's fix this now.
 
@@ -584,16 +584,21 @@ sudo zfs create -sV 64G rpool/ROOT/ubuntu_uzcb39/var/lib/docker
 # rpool/ROOT/ubuntu_uzcb39/var/lib/docker is where the dataset is. Note that this will not be mounted to /var/lib/docker, which is different from the one above.
 # -V creates a zvol
 # -s makes it sparse, i.e, dynamically expands instead of taking all defined space
+# set a max size of 64G
 ```
 
 **Format the zvol**. ZFS Volumes are identified as devices in the `/dev/zvol/{dsk,rdsk}/pool` directory. Since we created a block device, let's format it to `ext4`.
 
-`sudo mkfs.ext4 /dev/zvol/rpool/ROOT/ubuntu_uzcb39/var/lib/docker`
+```shell
+# The zvol we just created is mounted at /dev/zvol/rpool/ROOT/ubuntu_uzcb39/var/lib/docker.
+sudo mkfs.ext4 /dev/zvol/rpool/ROOT/ubuntu_uzcb39/var/lib/docker
+```
 
 **Mount the `ext4` partitation to `/var/lib/docker`.**
 
 ```shell
 sudo mkdir -p /var/lib/docker
+# Mount ext4-formatted zvol (block device) to /var/lib/docker
 sudo mount /dev/zvol/rpool/ROOT/ubuntu_uzcb39/var/lib/docker /var/lib/docker
 ```
 
@@ -602,7 +607,7 @@ sudo mount /dev/zvol/rpool/ROOT/ubuntu_uzcb39/var/lib/docker /var/lib/docker
 ```shell
 df -hT
 # /dev/zd0             ext4    63G  5.8G   54G  10% /var/lib/docker
-# Great!
+# It is mounted, great!
 ```
 
 **Start Docker back up and check status.**
@@ -618,7 +623,7 @@ docker info
 # > userxattr: false
 ```
 
-**Make changes persistent.** Make sure the zvol is automatically mounted to `/var/lib/docker`.
+**Make changes persistent.** Make sure the zvol is automatically mounted to `/var/lib/docker` after system reboots.
 
 ```shell
 sudo vim /etc/fstab
