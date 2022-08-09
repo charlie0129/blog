@@ -1,7 +1,7 @@
 ---
-title: Let Docker Use overlay2 Driver on ZFS Datasets
-description: ZFS is a great filesystem, and Docker is a great tool. But combining them can be a terrible idea...
-slug: docker-overlayfs2-on-zfs
+title: Docker and ZFS - A Tough Pair
+description: ZFS is a state-of-the-art filesystem, and Docker is a revolutionary tool. But combining them can be a terrible idea...
+slug: docker-and-zfs-a-tough-pair
 date: 2022-08-07 08:54:00+0800
 categories:
     - filesystem
@@ -22,6 +22,12 @@ Outline:
 - How to actually solve the problem
 
 We will dive into the source code of [moby](https://github.com/moby/moby), [OpenZFS](https://github.com/openzfs/zfs), and Linux [kernel](https://github.com/torvalds/linux) to find out.
+
+**Note:** I admit this blog is not so beginner-friendly, which requires some prerequisites, otherwise you may have a hard time reading it though. I will give some questions or concepts after each prerequisite to help you know your understanding is enough on this topic.
+- **general computer/unix concepts** ([block devices](https://en.wikipedia.org/wiki/Device_file#Block_devices), [copy-on-write](https://en.wikipedia.org/wiki/Copy-on-write), [mount points](https://en.wikipedia.org/wiki/Mount_(computing)))
+- **basic filesystem concepts** (difference between block devices and filesystems, common filesystems, [basic understanding of Linux Virtual Filesystem](https://www.starlab.io/blog/introduction-to-the-linux-virtual-filesystem-vfs-part-i-a-high-level-tour))
+- **the basics of ZFS filesystem** ([terminologies like datasets and snapshots](https://docs.oracle.com/cd/E18752_01/html/819-5461/ftyue.html), [what are rollbacks](https://manpages.ubuntu.com/manpages/jammy/man8/zfs-rollback.8.htmlunionfs ))
+- **Docker images** ([what are image layers](https://docs.docker.com/storage/storagedriver/#images-and-layers), when they are created/deleted, how it works with UnionFS)
 
 ## Background
 
