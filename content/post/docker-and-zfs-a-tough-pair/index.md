@@ -63,7 +63,7 @@ Hmm, sounds good, right? Well, keep reading. If it is that good, this blog would
 
 There is one single problem with ZFS that bothered me since the very beginning: **Docker**.
 
-Although Docker docs *proudly* advertise its `zfs` driver as something high-performance:
+When using Docker on ZFS, one can only use its `zfs` driver (no, you cannot use `overlay2` directly. We will see why later.). Although Docker docs *proudly* advertise its `zfs` driver as something high-performance:
 
 > zfs is a good choice for high-density workloads such as PaaS. [^3]
 > 
