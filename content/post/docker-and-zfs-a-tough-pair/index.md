@@ -92,6 +92,9 @@ Let's take the Dockerfile in [kube-trigger](https://github.com/kubevela/kube-tri
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Note: the ${BIN} needs to be replaced with the actual binary,
+# otherwise it won't work. Refer to Makefile for how it can be done.
+
 ARG BUILD_IMAGE=golang:1.17
 ARG BASE_IMAGE=gcr.io/distroless/static:nonroot
 
@@ -106,59 +109,51 @@ ARG GOPROXY
 ENV GOPROXY=${GOPROXY}
 RUN go mod download
 
+COPY build       build
+COPY hack        hack
+COPY cmd         cmd
+COPY api         api
+COPY controllers controllers
+COPY pkg         pkg
+
 ARG TARGETARCH
 ARG ARCH
-# TARGETARCH in Docker BuildKit have higher priority.
-ENV ARCH=${TARGETARCH:-${ARCH:-amd64}}
 ARG TARGETOS
 ARG OS
-# TARGETOS in Docker BuildKit have higher priority.
-ENV OS=${TARGETOS:-${OS:-linux}}
 ARG VERSION
-ENV VERSION=${VERSION}
 ARG GOFLAGS
-ENV GOFLAGS=${GOFLAGS}
+ARG DIRTY_BUILD
+ARG ENTRY
 
-COPY build/ build/
-COPY hack/ hack/
-COPY cmd/ cmd/
-COPY pkg/ pkg/
-
-RUN ARCH=${ARCH}                \
-        OS=${OS}                \
-        OUTPUT=kube-trigger     \
-        VERSION=${VERSION}      \
-        GOFLAGS=${GOFLAGS}      \
-        /bin/sh build/build.sh  \
-        cmd/kubetrigger/main.go
+RUN ARCH=${TARGETARCH:-${ARCH:-amd64}} \
+        OS=${TARGETOS:-${OS:-linux}}   \
+        OUTPUT=${BIN}                  \
+        VERSION=${VERSION}             \
+        GOFLAGS=${GOFLAGS}             \
+        /bin/sh build/build.sh         \
+        ${ENTRY}
 
 FROM ${BASE_IMAGE}
 WORKDIR /
-COPY --from=builder /workspace/kube-trigger .
-USER 65532:65532
-
-ENTRYPOINT ["/kube-trigger"]
+COPY --from=builder /workspace/${BIN} .
+ENTRYPOINT ["/${BIN}"]
 ```
 </details>
 
-We will focus on L29-L40:
+We will focus on L39-L46:
 
 ```Dockerfile
 ARG TARGETARCH
 ARG ARCH
-# TARGETARCH in Docker BuildKit have higher priority.
-ENV ARCH=${TARGETARCH:-${ARCH:-amd64}}
 ARG TARGETOS
 ARG OS
-# TARGETOS in Docker BuildKit have higher priority.
-ENV OS=${TARGETOS:-${OS:-linux}}
 ARG VERSION
-ENV VERSION=${VERSION}
 ARG GOFLAGS
-ENV GOFLAGS=${GOFLAGS}
+ARG DIRTY_BUILD
+ARG ENTRY
 ```
 
-You might be thinking, this is just some build args and envs, so what? Yes, this part almost does nothing, and should finish immediately. That's exactly the case on `overlay2`, but not on `zfs`, which will **take minutes**!
+You might be thinking, this is just some build args, so what? Yes, this part almost does nothing (creates some image layers), and should finish immediately. That's exactly the case on `overlay2`, but not on `zfs`, which will **take minutes**!
 
 Such slow build times are driving me crazy.
 
