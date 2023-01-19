@@ -18,20 +18,20 @@
     &.extended {
         @include respond(md) {
             max-width: 1024px;
-            --left-sidebar-max-width: 25%;
-            --right-sidebar-max-width: 30%;
+            --left-sidebar-max-width: 150px;
+            --right-sidebar-max-width: 250px;
         }
 
         @include respond(lg) {
             max-width: 1280px;
-            --left-sidebar-max-width: 20%;
-            --right-sidebar-max-width: 30%;
+            --left-sidebar-max-width: 180px;
+            --right-sidebar-max-width: 250px;
         }
 
         @include respond(xl) {
             max-width: 1920px;
-            --left-sidebar-max-width: 245px;
-            --right-sidebar-max-width: 366px;
+            --left-sidebar-max-width: 220px;
+            --right-sidebar-max-width: 250px;
         }
     }
 
