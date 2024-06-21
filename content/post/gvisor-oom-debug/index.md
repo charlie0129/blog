@@ -9,6 +9,12 @@ tags:
     - gvisor
 ---
 
+> **Recent Update**: One month later, after we opened our issue [#10264](https://github.com/google/gvisor/issues/10264), it turns out that the gVisor developers are also aware of tha lacking of documentation about the `systemd-cgroup` option. Finally:
+> - They have added the `systemd-cgroup` option to the documentation in [8c3abba](https://github.com/google/gvisor/commit/8c3abba8000496c06341653f158dc34a4318565a), although the documentation website doesn't seem to be updated as of now.
+> - `runsc` will throw a warning if it detects a systemd-like path but `systemd-cgroup` is not used to tell you about the possible misconfiguration.
+> 
+> So if you are using gVisor with systemd cgroup, you should add the `systemd-cgroup` option to the `runsc` configuration, if not already.
+
 ## The Problem
 
 Recently we found some of our Kubernetes nodes were constant going down, completely dead, with no luck connecting to it. Taints like `node.kubernetes.io/unreachable:NoSchedule` and `node.kubernetes.io/unreachable:NoExecute` were automatically added to the nodes because the `kubelet` was not able to communicate with the API server. The only way to bring the node back was to restart it. After some debugging, we found out that some bad gVisor-created (`runsc` runtime) Pods was eating all the memory of the node and killing it. Traditional Pods with `runc` runtime were running fine.
