@@ -47,3 +47,7 @@ I wrote some scripts just to make my life easier.
 - [nix-list](htts://github.com/charlie0129/dotfiles/blob/master/bin/common/nix-list)
 - [nix-search](htts://github.com/charlie0129/dotfiles/blob/master/bin/common/nix-search)
 - [nix-uninstall](htts://github.com/charlie0129/dotfiles/blob/master/bin/common/nix-uninstall)
+
+## Later Steps
+
+There is [nix-darwin](https://github.com/LnL7/nix-darwin) to make declarative configuration easier. I don't have time to try it yet but I will definitely give it a try when I have time.
