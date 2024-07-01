@@ -39,6 +39,12 @@ I don't want to download a tarball and extract it every now and then. I know you
 nix registry pin nixpkgs
 ```
 
+If you are like me in China, you may want to use a mirror. 
+
+```bash
+echo "substituters = https://mirrors.sjtug.sjtu.edu.cn/nix-channels/store/ https://cache.nixos.org/" | sudo tee -a /etc/nix/nix.conf
+```
+
 ## Using
 
 I wrote some scripts just to make my life easier. 
