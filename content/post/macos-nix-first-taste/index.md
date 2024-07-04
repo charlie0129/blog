@@ -15,7 +15,7 @@ tags:
 
 Note that this blog currently acts as a reference for me. It is not a comprehensive guide on why and how to use Nix on macOS.
 
-I chose nix mainly because I am tired of Homebrew's slowness. 
+I chose nix because I am tired of Homebrew's slowness and NOT PROVIDING BOTTLES (BINARY) FOR OLD MACOS VERSIONS.
 
 ## Install 
 
