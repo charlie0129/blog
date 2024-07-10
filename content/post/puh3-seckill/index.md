@@ -113,7 +113,7 @@ filter()
 
 发现代码是 minimized （可预见），但是好像已经看见突破口了（`disabled`）：
 
-![minized 的代码](images/minimized-js.png)
+![minimized 的代码](images/minimized-js.png)
 
 没事，我们格式化一下这部分代码：
 
@@ -152,7 +152,7 @@ function fuckDelay() {
     let body = $response.body
 
     // Just enable the fucking button!
-    body = body.replaceAll('e.disabled', 'false')
+    body = body?.replaceAll('e.disabled', 'false')
 
     $done({
         body
