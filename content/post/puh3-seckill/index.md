@@ -15,7 +15,7 @@ tags:
 
 ![有问题的牙根](images/tooth.jpg)
 
-有一说一，北医三院的口腔科 *牙体牙髓* 是真的难抢，基本就是秒没。早起了一天，一早起来前一秒还有，后面没了，抓狂。但是！作为一个安静文明的人，不能因为这种事情就抓狂，需要冷静分析，优化流程。让我们复盘一下卡在哪里。
+有一说一，北医三院的口腔科 *牙体牙髓* 是真的难抢，基本就是秒没。早起了一天，一早起来前一秒还有，后面没了，抓狂。但是！作为一个安静文明的人，需要冷静分析，优化流程。让我们复盘一下卡在哪里，打通抢号闭环，赋能口腔诊疗，形成组合拳。
 
 我们可以分为两种情况 **抢号** 和 **捡漏**：
 
@@ -35,9 +35,24 @@ tags:
 
 有人会问，你怎么不用脚本自动抢号？这个问题我也想过，但是涉及到支付等，操作太多，需要大量测试，对我来说不值得。反正都是早起抢号，优化手动抢号流程一般来说这就够了。
 
-> 注意，不要用北医三院 APP ，1. 这玩意非常慢 2. 返回 body 加密 3. 不能开代理，不方便我们操作。用微信小程序（实际上是网页）的成功率更高。
+> 注意，不要用北医三院 APP ，1. 这玩意非常慢 2. 返回 body 加密（我不会解，教教我） 3. 不能开代理，不方便我们操作。用微信小程序（实际上是网页）的成功率更高。
 
-## 医生过滤
+## 准备工作
+
+由于接下来我们要修改 HTTPS 请求内容，但是正常来说 HTTPS 是通过 SSL/TLS 加密的，我们无法直接修改。所以我们需要一个中间人，让手机信任这个中间人，然后中间人再去请求，这样我们就能修改请求内容了，也就是要做中间人攻击（MitM Attack）。这有很多种方式，我这里用了 macOS 上的 Surge ，用其他的例如 Charles, mitmproxy 也是可以的。
+
+1. 打开 Surge 的 HTTPS Decryption；
+2. 在 MitM Hostnames 中添加 `mp.mhealth100.com` ，这是北医三院小程序（网页）的域名，这样才能对其进行 MitM；
+3. 点击导出 Export for iOS Simulator （不用被其名称迷惑，这个证书是正常的 Signed Certificate ，可以用在手机上），你会得到一个 `.crt` 文件；
+4. 通过某些方式（例如 `python -m http.server` ）将这个 `.crt` 文件传到手机上，然后在手机上安装。注意 iPhone 用户在输入密码安装后，需要在 General -> About -> Certificate Trust Settings 中信任这个证书（Enable Full Trust for Root Certificates）；
+5. 将你的 Wi-Fi 代理设置为你电脑的 IP 地址（Settings -> Wi-Fi -> `i` -> Configure Proxy -> Manual），端口为 Surge 的 HTTP 代理端口；
+6. 理论上现在你可以在微信上访问北医三院小程序（网页），在 Surge Dashboard 中能看到请求内容，并且不会有证书错误。
+
+![Surge HTTPS Decryption](images/surge-mitm.png)
+
+![Surge Dashboard 查看加密的 HTTPS 请求内容](images/surge-https-decrypt.png)
+
+## 实现 *医生过滤* 功能
 
 过滤医生的列表，让我们在手机上能快速找到我们需要的医生。
 
@@ -45,11 +60,11 @@ tags:
 
 ![医生 API](images/doctor-schedules.png)
 
-具体来说，请求 `https://mp.mhealth100.com/gateway/registration/appointment/schedule/find` 这个 API ，我们可以根据 body 中的 `.data[].dockorTitle` 找到是什么专业的医生（有时在 `.data[].desc` 里面）。
+具体来说，小程序（网页）获取医生的排版列表是通过请求 `https://mp.mhealth100.com/gateway/registration/appointment/schedule/find` 这个 API 。我们可以根据 body 中的 `.data[].dockorTitle` 找到是什么专业的医生（有时在 `.data[].desc` 里面）。
 
-那我们要做的就是修改这个 API 返回的医生列表，只保留我们需要的医生。
+那我们要做的就是修改这个 API 返回的医生列表，只保留我们需要的医生，其他的删去。
 
-这里我用的是 Surge ，所以直接用 Surge 的 Script 功能来实现，手机走电脑代理，信任根证书即可。
+这里我用 Surge 的 Script 功能来实现。
 
 ![Surge Script](images/surge-scripts.png)
 
@@ -108,7 +123,7 @@ function filter() {
 filter()
 ```
 
-在 Surge 中添加上面的脚本，限制一下 URL Regular Expression 为 `^https://mp.mhealth100.com/gateway/registration/appointment/schedule/find.*` 限制作用范围：
+在 Surge Scripts 中添加上面的脚本，限制一下 URL Regular Expression 为 `^https://mp.mhealth100.com/gateway/registration/appointment/schedule/find.*` 限制作用范围：
 
 ![Surge 医生过滤脚本](images/filter-script.png)
 
@@ -116,17 +131,17 @@ filter()
 
 ![过滤效果](images/filtered-result.png)
 
-## 等待去除
+## 实现 *等待去除* 功能
 
 去除挂号前阅读协议的强制 3s 等待时间。
 
-因为等待的过程是大概率是前端进行的，而且写在 js 里面，防止微信浏览器缓存 js 脚本不去请求（这样我们能在抓包的时候抓到它，查看内容），进入微信设置 -> 通用 -> 存储空间 -> 缓存 -> 网页浏览插件 -> 清理。
+因为等待的过程是大概率是前端进行的，而且写在 js 里面，防止因为 GET 的缓存策略微信浏览器缓存 js 脚本不去请求（这样我们能在抓包的时候抓到它，查看内容），进入微信设置 -> 通用 -> 存储空间 -> 缓存 -> 网页浏览插件 -> 清理。
 
-打开网页，并抓包，通过搜索关键词找到对应代码位置，可以看到在 `https://mp.mhealth100.com/patient/registration/js/appointment-choise-doctor-xxx.js` 中有可疑代码：
+打开网页，并抓包，通过搜索关键词（我已阅读）找到对应代码位置，可以看到在 `https://mp.mhealth100.com/patient/registration/js/appointment-choise-doctor-xxx.js` 中出现了类似字眼，十分可疑：
 
 ![关键词搜代码](images/search-button-keyword.png)
 
-发现代码是 minimized （可预见），但是好像已经看见突破口了（`disabled: e.disabled` 似乎控制着这个按钮的可点击与否）：
+发现代码是 minimized （可预见的，为了降低 js 大小），但是好像已经看见突破口了（`disabled: e.disabled` 似乎控制着这个按钮的可点击与否）：
 
 ![minimized 的代码](images/minimized-js.png)
 
@@ -181,17 +196,24 @@ fuckDelay()
 
 ![启用延迟去除脚本](images/delay-remove-script.png)
 
-上手机！测试（记得跟开头一样清理一遍微信缓存，强制让微信浏览器拉我们修改过的 js ）。不用等 3 秒啦！能直接点进去了！这下领先一步了！
+上手机！测试（记得跟开头一样清理一遍微信缓存，防止 GET 请求的缓存，强制让微信浏览器拉我们修改过的 js ）。不用等 3 秒啦！能直接点进去了！这下领先一步了！
 
 ![没有等待了](images/no-delay.png)
 
-注意：如果发现什么时候等待又有了，记得清理缓存，可能是因为你代理关掉之后又变回未修改的js了。
+注意：如果发现什么时候等待又有了，记得清理缓存，可能是因为你代理关掉之后又变回未修改的 js 了。
 
-## 余号推送
+## 实现 *余号推送* 功能
 
-如果平时去看的话，正常情况所有牙体牙髓医生的号应该都是全部约满的。想在平时约到的话，只能等别人退号了你刚好捡漏。但是要等到这个机会，靠自己看刚好碰上是相当困难的的。
+如果平时去看的话，正常情况所有牙体牙髓医生的号应该都是全部约满的。想在平时约到的话，只能等别人退号了你刚好捡漏。但是要等到这个机会，靠自己看刚好碰上是相当困难的。
 
-这时候就需要一个脚本帮我们时刻查询，是否有剩余的号。我随便手糊了一个脚本，自动查询关键词内的号，然后通过 Bark App 推送到手机上。靠这个帮我抢到了张平医生的号哈哈。
+这时候就需要一个脚本帮我们时刻查询，是否有剩余的号。我随便手糊了一个脚本：
+
+1. 获取所有的号；
+2. 根据关键词过滤；
+3. 根据排班中余号过滤；
+4. 通过 Bark App 将有余号的医生推送到手机上。
+
+以下是脚本内容：
 
 ```javascript
 #!/usr/bin/env node
@@ -215,7 +237,7 @@ const barkUrl = "https://api.day.app/XXXXXX"
 
 // !!!!! FILL THIS AREA !!!!!
 // Copy the headers from the request made by the browser to the server. 
-// Note that you need to use the request that searches schedules, i.e., 
+// Note that you need to use the request that searches *all* schedules, i.e., 
 // the request path should look like:
 // /gateway/registration/appointment/schedule/find
 const header = `
@@ -358,16 +380,16 @@ main()
 
 你只需用 node 运行这个脚本即可。注意：
 
-1. 一定要填写文章标注的地方，`barkUrl` 很好说，安装 Bark 之后就会有。 `header` 的话找你查找医生时候的请求（看脚本中的注释），复制出来里面的 header （全部复制！包括 HTTP method 和 URL ），然后复制到代码里标注的地方即可。
+1. 一定要填写文章标注的地方，`barkUrl` 很好说，安装 Bark 之后就会有。 `header` 的话找你查找医生时候的请求（记得看脚本中的注释，一定是查全部日期的那个请求，不然可能会漏掉），复制出来里面的 header （见下图。全部复制！包括 HTTP method 和 URL ），然后复制到代码里标注的地方即可。
 2. 由于 token 更新频繁，如果 token 过期了会通过手机更新提醒你出错了，这时你需要手机上再打开小程序（网页），电脑上抓包找到新的 header 并替换。第一行 GET xxx 记得不要漏了，因为里面有日期，每天不一样，日期不对会出错。
 
-![寻找 Header](images/find-headers.png)
+![需要复制的 Header](images/find-headers.png)
 
 运行！一旦有号，你的手机就会收到通知了！比如这是我捡漏的时候的通知：
 
-![Console 日志](images/console-log.png)
+![JavaScript Console 日志](images/console-log.png)
 
-![iPhone Push 通知的内容](images/bark-notification.png)
+![推送到 iPhone 的通知内容](images/bark-notification.png)
 
 我也成功通过这个方式抢到了张平医生的号。当时在专心写代码，手机突然震了一下，一看有号了，马上以迅雷不及掩耳之势，点开小程序，支付，成功！
 
@@ -377,7 +399,8 @@ main()
 
 Tips：
 1. 提前找个号挂，填过挂号信息，不然到时候填信息太慢了；
-2. 一旦快到 7 点了，因为都在刷，小程序会很卡，这时你不要刷新网页或者退出去，这样会全部重载资源很慢；
-3. 在选医生的时候，不要点第一个“全部日期”这样会查所有的日期，查询量大，慢；你要在前一天和当天的日期这两个疯狂互相点，如果限流了，继续点；如果在转圈加载了，别点了，等载出来。
+2. 一旦快到 7 点了，因为都在刷，小程序会很卡，这时你不要刷新网页或者退出去，这样会全部重载资源很慢，你只需切换日期即可刷新内容；
+3. 在选医生的时候，不要点第一个“全部日期”这样会查所有的日期，查询量大，慢；你要在前一天和当天的日期这两个疯狂互相点，如果限流了，继续点；如果在转圈加载了，那就别点了，你要做的是等它载出来；
+4. 看到号了之后（做了本文的操作后，都是过滤过的你想要的号了，应当立马能看到），点进去，同意协议（不用等 3 秒了，直接点同意），支付，拼图验证一下，付款，成功！
 
 > 关于怎么用 Surge 做这种 HTTPS web debugging 我后续可能会单独出一篇文章（有精力的话）。
