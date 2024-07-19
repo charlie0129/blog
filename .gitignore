@@ -4,3 +4,7 @@
 public
 resources
 assets/jsconfig.json
+
+# draw.io
+*.bkp
+*.dtmp
