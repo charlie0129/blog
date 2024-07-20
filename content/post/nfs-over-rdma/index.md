@@ -324,7 +324,9 @@ root@t3640:/# fio --rw=randread --bs=4k --numjobs=1 --iodepth=1 --runtime=10 --t
 
 Here are the results we have all been waiting for!
 
-For IO operations per second (IOPS), the average IOPS for NFS over RDMA is higher than NFS over TCP. The difference is more significant when the block size is larger and the most significant when `iodepth=12`.
+For IO operations per second (IOPS), the average IOPS for NFS over RDMA is higher than NFS over TCP. The difference is more significant when the block size is larger and the most significant when `iodepth=12`. We can also see that no matter the block size and iodepth, the IOPS for NFS over TCP is capped at around 47 KIOPS, while the one of RDMA is significantly higher at over 180 KIOPS.
+
+The reason why the difference is smaller with larger block sizes is that the network bandwidth is the bottleneck. For our 25GbE network, the maximum bandwidth is around 2800 MiB/s. We are hitting this limit with larger block sizes and this much IOPS. This is unrelated to the RDMA or TCP. If you have a faster network, you will see this difference for larger block sizes as well.
 
 For 4K block size:
 
@@ -338,7 +340,9 @@ For 4K block size:
 
 ![IOPS vs Block Size for NFS over RDMA and TCP](plots/iops_avg.svg)
 
-For bandwidth, the average bandwidth for NFS over RDMA is higher (around 4x for small block sizes). The reason why the difference is more significant when the block size is small (4-16) is that we are limited by the network bandwidth. Since we have a 25GbE network, the maximum bandwidth is around 2800 MiB/s so you can see that the bandwidth is capped at 2800 MiB/s for large block sizes and deep IO depths. If you have a faster network, you will see this 4x difference for larger block sizes as well.
+For bandwidth, the average bandwidth for NFS over RDMA is significantly higher (around 4x for small block sizes). 
+
+The reason why the difference is more significant when the block size is small (4-16) is that we are limited by the network bandwidth. Since we have a 25GbE network, the maximum bandwidth is around 2800 MiB/s so you can see that the bandwidth is capped at 2800 MiB/s for large block sizes and deep IO depths. If you have a faster network, you will see this 4x difference for larger block sizes as well.
 
 ![Bandwidth vs Block Size for NFS over RDMA and TCP](plots/bw_avg.svg)
 
