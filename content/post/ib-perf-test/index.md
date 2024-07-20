@@ -75,7 +75,7 @@ On another node:
 root@tj01-h20-node139:/# ib_send_bw --report_gbit -a -F -d mlx5_2 tj01-4090-node099
 ```
 
-`tj01-4090-node099` is the hostname of the other node.
+`tj01-4090-node099` is the IP address (hostname) of the other node.
 
 ```
 ---------------------------------------------------------------------------------------
