@@ -256,7 +256,7 @@ root@t3640:/# ls -l /mnt/nfs
 ```
 
 
-### NFS with RDMA
+## Configure NFS with RDMA
 
 **Load RDMA transport module on the server:**
 
