@@ -33,24 +33,38 @@ Two servers are connected using a 25GbE network. The goal is to set up NFS over 
 
 **Install RDMA/IB dependencies:**
 
-```console
-root@ft2000:/# yum install -y libibverbs librdmacm opensm-libs   rdma-core rdma-core-devel librdmacm-utils opensm-static srp_daemon ucx-devel ucx-rdmacm infiniband-diags ibacm opensm-devel ucx ucx-ib    libibumad  opensm mstflint  ucx-cma openmpi rshim  libibverbs-utils perftest   rdma-core rdma-core-devel  infiniband-diags   rshim
-```
+Dependencies should be the same on both devices (no server and client differences). The difference is only the package manager (and OS).
+
+On UOS Server 20 1070a, which is Anolis8-based, which is again CentOS8-based:
 
 ```console
-root@t3640:/# apt install -y infiniband-diags srptools perftest opensm-doc librdmacm-dev rdmacm-utils librdmacm1 ibacm libibmad-dev libibmad5 libibumad-dev libibumad3 ibverbs-utils libibverbs-dev libibverbs1 mstflint rdma-core opensm fio librbd1 librados2 libibnetdisc5 ibverbs-providers 
+root@ft2000:/# yum install -y libibverbs librdmacm opensm-libs rdma-core rdma-core-devel \
+    librdmacm-utils opensm-static srp_daemon ucx-devel ucx-rdmacm infiniband-diags ibacm \
+    opensm-devel ucx ucx-ib libibumad opensm mstflint ucx-cma openmpi rshim libibverbs-utils \
+    perftest rdma-core rdma-core-devel infiniband-diags rshim
+```
+
+On Debian 12:
+
+```console
+root@t3640:/# apt install -y infiniband-diags srptools perftest opensm-doc librdmacm-dev \
+    rdmacm-utils librdmacm1 ibacm libibmad-dev libibmad5 libibumad-dev libibumad3 \
+    ibverbs-utils libibverbs-dev libibverbs1 mstflint rdma-core opensm fio librbd1 \
+    librados2 libibnetdisc5 ibverbs-providers
 ```
 
 **Make sure link is up on both servers using `ip` or `ibstatus` command:**
 
 Client:
 
+Use `ip` (note `state UP`):
+
 ```console
 root@t3640:/# ip l show dev enp1s0f1np1
 6: enp1s0f1np1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP mode DEFAULT group default qlen 1000
 ```
 
-Or
+Or use `ibstatis` (note `phys state: 5: LinkUp`):
 
 ```console
 root@t3640:/# ibstatus
@@ -75,12 +89,14 @@ Infiniband device 'mlx5_1' port 1 status:
 
 Server:
 
+Use `ip` (note `state UP`):
+
 ```console
 root@ft2000:/# ip l show dev enp16s0f0np0
 4: enp16s0f0np0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP mode DEFAULT group default qlen 1000
 ```
 
-Or 
+Or use `ibstatis` (note `phys state: 5: LinkUp`):
 
 ```console
 root@ft2000:/# ibstatus
@@ -151,7 +167,8 @@ root@t3640:/# ethtool -A enp1s0f0np0 rx on tx on
 Run the following command on client and server, respectively:
 
 ```console
-root@t3640:/# ib_send_bw --report_gbit -a -F -d mlx5_1 # device name can be seen in `ibstatus` command
+root@t3640:/# ib_send_bw --report_gbit -a -F -d mlx5_1
+# device name can be seen in `ibstatus` command
 ```
 
 ```console
@@ -317,7 +334,9 @@ I will only test **random read** performance since sequential read performance i
 The actual command will be:
 
 ```console
-root@t3640:/# fio --rw=randread --bs=4k --numjobs=1 --iodepth=1 --runtime=10 --time_based --loops=1 --ioengine=libaio --direct=1 --invalidate=1 --fsync_on_close=1 --randrepeat=1 --norandommap --exitall --name task1 --filename=/mnt/nfs/testfile --size=256M
+root@t3640:/# fio --rw=randread --bs=4k --numjobs=1 --iodepth=1 --runtime=10 --time_based --loops=1 \
+    --ioengine=libaio --direct=1 --invalidate=1 --fsync_on_close=1 --randrepeat=1 --norandommap \
+    --exitall --name task1 --filename=/mnt/nfs/testfile --size=256M
 ```
 
 > The full log and related scripts can be found in the [Appendix](#appendix).
