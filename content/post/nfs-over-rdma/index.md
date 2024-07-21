@@ -17,7 +17,7 @@ So I decided to test NFS over RDMA somehow.
 
 | Hostname | `ft2000` (Server)            | `t3640` (Client)             |
 | -------- | ---------------------------- | ---------------------------- |
-| CPU      | FT-2000+/64                  |                              |
+| CPU      | Phytium FT-2000+/64          | Intel Core i9-10900K         |
 | RAM      | Quad Channel DDR4 128GB      | Dual Channel DDR4 64GB       |
 | NIC      | Mellanox ConnextX-4 Lx 25GbE | Mellanox ConnextX-4 Lx 25GbE |
 | OS       | UOS Server 20 1070a          | Debian 12                    |
