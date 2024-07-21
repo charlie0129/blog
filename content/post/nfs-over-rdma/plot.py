@@ -14,7 +14,7 @@ def set_style():
         style="ticks",
         rc={
             # "figure.figsize": (1*4, 1*2),
-            "figure.figsize": (4 * 1 * 4.5, 3 * 1 * 2.2),
+            "figure.figsize": (3 * 1 * 4.5, 4 * 1 * 2.2),
             "lines.linewidth": 1,
             "axes.grid": True,
             "grid.linestyle": "--",
@@ -319,7 +319,7 @@ axis_labels = {
 def plot(plot_data: PlotData, y_axis: str, ymax: int) -> None:
     print(f"Plotting {y_axis}...")
     fig = plt.figure()
-    gs = fig.add_gridspec(3, 4, hspace=0.45, wspace=0.23)
+    gs = fig.add_gridspec(4, 3, hspace=0.45, wspace=0.23)
     axs = gs.subplots()
     filename = f"{y_axis}"
 
@@ -351,8 +351,8 @@ def plot(plot_data: PlotData, y_axis: str, ymax: int) -> None:
             )
 
         # Set plot size
-        col = idx % 4
-        row = idx // 4
+        col = idx % 3
+        row = idx // 3
         ax = axs[row, col]
 
         ax = sns.barplot(
@@ -365,7 +365,7 @@ def plot(plot_data: PlotData, y_axis: str, ymax: int) -> None:
             errorbar="sd",
         )
 
-        ax.yaxis.set_major_locator(ticker.LinearLocator(5))
+        ax.yaxis.set_major_locator(ticker.LinearLocator(6))
 
         if ymax != 0:
             ax.set_ylim(0, ymax)
@@ -379,7 +379,8 @@ def plot(plot_data: PlotData, y_axis: str, ymax: int) -> None:
         ax.set_title(f"iodepth={iodepth}")
         ax.set(xlabel="", ylabel="")
 
-    axs[1, 0].set(ylabel=axis_labels[y_axis])
+    for ax in axs[:, 0]:
+        ax.set(ylabel=axis_labels[y_axis])
     for ax in axs[-1, :]:
         ax.set(xlabel=axis_labels[x_axis])
 
