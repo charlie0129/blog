@@ -289,6 +289,7 @@ Note: if you see `echo: write error: protocol not supported`, it means that the 
 
 ```console
 root@ft2000:/# echo rdma 20049 > /proc/fs/nfsd/portlist
+# To make it permanent: echo 'rdma=nfsrdma' >> /etc/nfs.conf
 ```
 
 **Load the RDMA transport module on the client**
