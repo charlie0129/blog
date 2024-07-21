@@ -306,6 +306,7 @@ Before running the mount command, unmount the NFS share if it is mounted (`umoun
 
 ```console
 root@t3640:/# mount -t nfs -o rdma,port=20049 192.168.23.1:/tmp /mnt/nfs
+# To make it permanent: echo '192.168.23.1:/tmp /mnt/nfs nfs defaults,proto=rdma,port=20049 0 0' >> /etc/fstab
 ```
 
 **Check the mount parameters:**
