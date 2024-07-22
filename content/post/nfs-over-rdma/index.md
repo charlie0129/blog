@@ -69,7 +69,7 @@ Or use `ibstatis` (note `phys state: 5: LinkUp`):
 ```console
 root@t3640:/# ibstatus
 Infiniband device 'mlx5_0' port 1 status:
-	default gid:	 fe80:0000:0000:0000:ee0d:9aff:fed9:8ff6
+	default gid:	 fe80:0000:0000:0000:<redacted>
 	base lid:	 0x0
 	sm lid:		 0x0
 	state:		 4: ACTIVE
@@ -78,7 +78,7 @@ Infiniband device 'mlx5_0' port 1 status:
 	link_layer:	 Ethernet
 
 Infiniband device 'mlx5_1' port 1 status:
-	default gid:	 fe80:0000:0000:0000:ee0d:9aff:fed9:8ff7
+	default gid:	 fe80:0000:0000:0000:<redacted>
 	base lid:	 0x0
 	sm lid:		 0x0
 	state:		 4: ACTIVE
@@ -101,7 +101,7 @@ Or use `ibstatis` (note `phys state: 5: LinkUp`):
 ```console
 root@ft2000:/# ibstatus
 Infiniband device 'mlx5_0' port 1 status:
-	default gid:	 fe80:0000:0000:0000:bac7:d5ff:fe7f:cc05
+	default gid:	 fe80:0000:0000:0000:<redacted>
 	base lid:	 0x0
 	sm lid:		 0x0
 	state:		 4: ACTIVE
@@ -110,7 +110,7 @@ Infiniband device 'mlx5_0' port 1 status:
 	link_layer:	 Ethernet
 
 Infiniband device 'mlx5_1' port 1 status:
-	default gid:	 fe80:0000:0000:0000:bac7:d5ff:fe7f:cc06
+	default gid:	 fe80:0000:0000:0000:<redacted>
 	base lid:	 0x0
 	sm lid:		 0x0
 	state:		 1: DOWN
@@ -167,7 +167,7 @@ root@t3640:/# ethtool -A enp1s0f0np0 rx on tx on
 Run the following command on client and server, respectively:
 
 ```console
-root@t3640:/# ib_send_bw --report_gbit -a -F -d mlx5_1
+root@t3640:/# ib_send_bw --report_gbit -F -d mlx5_1
 # device name can be seen in `ibstatus` command
 ```
 
@@ -195,29 +195,7 @@ root@ft2000:/# ib_send_bw --report_gbit -a -F -d mlx5_0 192.168.23.2
  GID: 00:00:00:00:00:00:00:00:00:00:255:255:192:168:23:02
 ---------------------------------------------------------------------------------------
  #bytes     #iterations    BW peak[Gb/sec]    BW average[Gb/sec]   MsgRate[Mpps]
- 2          1000           0.029629            0.028911            1.806916
- 4          1000           0.059258            0.056530            1.766561
- 8          1000             0.12               0.12   		   1.822011
- 16         1000             0.24               0.23   		   1.814474
- 32         1000             0.47               0.47   		   1.827926
- 64         1000             0.95               0.92   		   1.803978
- 128        1000             2.23               2.14   		   2.087232
- 256        1000             4.65               4.51   		   2.202802
- 512        1000             6.83               6.70   		   1.635296
- 1024       1000             13.65              13.21  		   1.612778
- 2048       1000             23.41              22.54  		   1.375834
- 4096       1000             23.08              22.96  		   0.700620
- 8192       1000             23.08              23.06  		   0.351821
- 16384      1000             23.16              23.10  		   0.176238
- 32768      1000             23.16              23.12  		   0.088211
  65536      1000             23.14              23.13  		   0.044119
- 131072     1000             23.15              23.14  		   0.022069
- 262144     1000             23.15              23.14  		   0.011036
- 524288     1000             23.15              23.15  		   0.005518
- 1048576    1000             23.15              23.15  		   0.002759
- 2097152    1000             23.15              23.15  		   0.001380
- 4194304    1000             23.15              23.15  		   0.000690
- 8388608    1000             23.15              23.15  		   0.000345
 ---------------------------------------------------------------------------------------
 ```
 
