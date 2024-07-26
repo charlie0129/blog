@@ -216,7 +216,13 @@ root@ft2000:/# systemctl enable nfs-server rpcbind
 
 **Use `/tmp` as a test dir and share it:**
 
-Since I want to test the network performance (TCP and RDMA), I don't want to be bottlenecked by the disk speed. So I will use `/tmp`, which is backed by RAM, as a reasonably fast directory to avoid bottlenecks.
+> Since I want to test the network performance (TCP and RDMA), I don't want to be bottlenecked by the disk speed. So I will use `/tmp`, which is backed by RAM (usually), as a reasonably fast directory to avoid bottlenecks.
+>
+> Make sure it is `tmpfs`, otherwise IO will be limited by your disk speed.
+> ```console
+> root@ft2000:/# mount | grep /tmp
+> tmpfs on /tmp type tmpfs (rw,nosuid,nodev)
+> ```
 
 ```console
 root@ft2000:/# echo '/tmp *(rw,async,insecure,no_root_squash)' >>/etc/exports
