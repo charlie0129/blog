@@ -27,13 +27,11 @@ Two servers are connected using a 25GbE network. The goal is to set up NFS over 
 
 ## RDMA Link Verification
 
-> Sopiler: Do not use Mellanox OFED (can be seen from `ofed_info -s`) if you want to use NFSoRDMA. It is not supported after version 3.4. Use inbox OS driver instead. So if you are using Mellanox OFED, you need to uninstall it now (a `uninstall.sh` is provided in the Mellanox OFED installation directory).
-> 
-> I personally ran into this issue when I tried to set up NFSoRDMA on my servers and found NFSoRDMA is not supported so I had to use the inbox OS driver and start over. You can continue reading to see what errors I encountered.
-
 **Install RDMA/IB dependencies:**
 
 Dependencies should be the same on both devices (no server and client differences). The difference is only the package manager (and OS).
+
+> If you are using Mellanox OFED, you can skip this step. Be sure to install Mellanox OFED using `--with-nfsrdma` flag. Otherwise, you will not be able to use NFS over RDMA.
 
 On UOS Server 20 1070a, which is Anolis8-based, which is again CentOS8-based:
 
@@ -269,7 +267,7 @@ root@ft2000:/# systemctl restart nfs-server
 
 **Instruct the server to listen on the RDMA transport port (20049 is the default port):**
 
-Note: if you see `echo: write error: protocol not supported`, it means that the NFSoRDMA is not supported in the Mellanox OFED version 3.4 and higher. You need to use the inbox OS driver (refer to *Install RDMA/IB dependencies* section in this blog). I was tripped by this issue.
+Note: if you see `echo: write error: protocol not supported`, it means that the NFSoRDMA is not supported in the Mellanox OFED. You need to use the inbox OS driver (refer to *Install RDMA/IB dependencies* section in this blog) or re-install Mellanox OFED with `--with-nfsrdma` flag. I was tripped by this issue.
 
 ```console
 root@ft2000:/# echo rdma 20049 > /proc/fs/nfsd/portlist
