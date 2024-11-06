@@ -39,7 +39,7 @@ Make sure the GPU is detected by the host. Note the NVIDIA GPUs `3b:00.0` (Your 
 3b:00.3 Serial bus controller [0c80]: NVIDIA Corporation TU104 USB Type-C UCSI Controller (rev a1)
 ```
 
-> You may ask: does your entire lab only own one RTX 3090? What kind of lab is this? Are you cave people?
+> You may ask: does your entire lab only own one RTX 5000? What kind of lab is this? Are you cave people?
 > 
 > Yes, although we have multiple projects worth over millions of Chinese Yuan, most of the money is gone to the some other places (which I cannot publicly speak on the Internet 🤫 ). And the professors have no emphasis on students' growth. 
 > As a result, we are actually poor as hell. 
@@ -64,6 +64,8 @@ The default installation options will work fine. If anything fails, you can chec
 PS: You need to blacklist `nouveau` driver. This is automatically done by PVE. If not, you can do this by creating a file `/etc/modprobe.d/blacklist-nouveau.conf` with the following content: `blacklist nouveau`. Then run `update-initramfs -u` to update the initramfs.
 
 PPS: If you used to passthrough this GPU to a VM, be sure to remove the GPU from the VM's hardware configuration in PVE otherwise PVE will bound the GPU to `vfio-pci` (see `Kernel driver in use` row in `lspci -k`) and cannot be used by the host.
+
+PPPS: Some kernel versions are known to have problems with NVIDIA drivers. If you encounter problems, you may need to downgrade/upgrade the kernel. For example, kernel version 5.10.0 is known to have ` make[3]: *** No rule to make target 'scripts/module.lds', needed by '/tmp/selfgz38416/NVIDIA-Linux-x86_64-560.35.03/kernel-open/nvidia.ko'` error.
 
 After installation finished, check if the driver is loaded.
 
