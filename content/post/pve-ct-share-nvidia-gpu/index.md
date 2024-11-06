@@ -219,15 +219,17 @@ After a successful installation, you should add cuda binaries to PATH. Instructi
 
 Everything should be working by this point.
 
-## Missing `nvidia-uvm` Problem
+## Missing `nvidia-uvm` and High Idle Power Draw
 
 One problem I encountered is that when the host reboots, the GPU is not accessible in the CT. This is because `nvidia-uvm` device isn't created until an application attempts to interact with the graphics card. This is a problem because no application will interact with the GPU at boot, so no `nvidia-uvm` device is created. But the CT needs the `nvidia-uvm` device bind-mounted at CT-startup in order to access the GPU.
 
-To solve this, we can run `nvidia-smi` (which creates `nvidia-uvm` device) at boot. Add the following line to the host's crontab to run `nvidia-smi` at boot.
+Also, the graphics card have insanely high power draw at idle (over 100 Watts). The GPU is in P0 and never leaves it. We can use `nvidia-persistenced` to let the GPU enter a low-power state (P8) when not in use.
+
+To solve this, we can run `nvidia-persistenced` (which keeps nvidia character device and handles frequency scaling) at boot. Add the following line to the host's crontab to run `nvidia-persistenced` at boot.
 
 ```console
 # crontab -e
-@reboot /usr/bin/nvidia-smi
+@reboot /usr/bin/nvidia-persistenced
 ```
 
 ## Downsides
