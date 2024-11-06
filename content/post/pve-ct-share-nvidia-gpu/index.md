@@ -227,6 +227,8 @@ Also, the graphics card have insanely high power draw at idle (over 100 Watts). 
 
 To solve this, we can run `nvidia-persistenced` (which keeps nvidia character device and handles frequency scaling) at boot. Add the following line to the host's crontab to run `nvidia-persistenced` at boot.
 
+PS: This only works if the host is a headless server (no monitor attached). If you have a monitor attached, you may need to run `nvidia-smi` below instead.
+
 ```console
 # crontab -e
 @reboot /usr/bin/nvidia-persistenced
