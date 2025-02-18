@@ -23,23 +23,26 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
+        with:
+          submodules: true  # Fetch Hugo themes (true OR recursive)
+          fetch-depth: 0    # Fetch all history for .GitInfo and .Lastmod
 
       - name: Cache Hugo resources
-        uses: actions/cache@v2
+        uses: actions/cache@v4
         env:
           cache-name: cache-hugo-resources
         with:
           path: resources
           key: ${{ env.cache-name }}
 
-      - uses: actions/setup-go@v2
+      - uses: actions/setup-go@v5
         with:
-          go-version: "^1.17.0"
+          go-version: "^1.23.0"
       - run: go version
 
       - name: Cache Go Modules
-        uses: actions/cache@v2
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cache/go-build
@@ -49,16 +52,16 @@ jobs:
             ${{ runner.os }}-go-
 
       - name: Setup Hugo
-        uses: peaceiris/actions-hugo@v2
+        uses: peaceiris/actions-hugo@v3
         with:
-          hugo-version: "0.124.1"
+          hugo-version: "0.144.0"
           extended: true
 
       - name: Build
         run: hugo --minify --gc
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v1
+        uses: actions/upload-pages-artifact@v3
         with:
           path: ./public
 
@@ -74,4 +77,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v1
+        uses: actions/deploy-pages@v4
