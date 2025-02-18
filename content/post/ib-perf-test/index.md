@@ -13,7 +13,7 @@ tags:
 
 We have a 200Gbps InfiniBand network among about 100 nodes, connected using *NVIDIA ConnectX-7 NICs (HDR200)* to a *NVIDIA MQM9700* switch. Each OSFP twin port (2xNDR, 2x400Gbps) on *QM9700* is splitted into 4xNDR200 ports to connect to 4x*NVIDIA ConnectX-7 NICs* using 2xNDR to 4xNDR200 DAC/ACC (OSFP to 4x OSFP).
 
-![Topology](images/topo.svg)
+![Topology](images/topo.png)
 
 We want to test the performance of the network between 2 nodes just to make sure it is working. We expect to see a bandwidth of around 200Gbps.
 
