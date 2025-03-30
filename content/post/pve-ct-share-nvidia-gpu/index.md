@@ -123,6 +123,8 @@ Now we need to allow the CT to access the GPU. I am using an unprivileged contai
 + lxc.mount.entry: /dev/fb0 dev/fb0 none bind,optional,create=file
 ```
 
+PS: If you cannot use `nvidia-smi` (it says `Failed to initialize NVML: Unknown Error`), there is a possibility that you are using `cgroup2`. Change all the `lxc.cgroup.devices.allow` lines to `lxc.cgroup2.devices.allow`.
+
 **Explanation:**
 
 Allows container access to NVIDIA device nodes:
