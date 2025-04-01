@@ -227,13 +227,13 @@ One problem I encountered is that when the host reboots, the GPU is not accessib
 
 Also, the graphics card have insanely high power draw at idle (over 100 Watts). The GPU is in P0 and never leaves it. We can use `nvidia-persistenced` to let the GPU enter a low-power state (P8) when not in use.
 
-To solve this, we can run `nvidia-persistenced` (which keeps nvidia character device and handles frequency scaling) at boot. Add the following line to the host's crontab to run `nvidia-persistenced` at boot.
+To solve this, we can run `nvidia-smi -pm 1` (which enables `nvidia-persistenced` and keeps nvidia character device and handles frequency scaling) at boot. Add the following line to the host's crontab to run `nvidia-smi -pm 1` at boot.
 
 PS: This only works if the host is a headless server (no monitor attached). If you have a monitor attached, you may need to run `nvidia-smi` below instead.
 
 ```console
 # crontab -e
-@reboot /usr/bin/nvidia-persistenced
+@reboot /usr/bin/nvidia-smi -pm 1
 ```
 
 ## Downsides
