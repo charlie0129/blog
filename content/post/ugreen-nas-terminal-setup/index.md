@@ -108,7 +108,26 @@ cd
 git clone https://github.com/charlie0129/dotfiles.git
 cd dotfiles
 ./bootstrap.sh -f
-zsh # 询问 use proxy 的时候选择 n （因为前面set过了），询问切换 default shell 的时候选择 y。
+zsh
+# 询问 Do you need to use a proxy [y/n] 的时候选择 n （因为前面 set 过 proxy 了）
+# 询问 Change login shell of root to /opt/bin/zsh 的时候选择 y （不然呢）
+```
+
+将 Opkg 的 bin 和 sbin 目录添加到 ZSH 的 PATH 中：
+
+```bash
+vim ~/dotfiles/env/custom.sh
+```
+
+```bash
+# This list is inserted before PATH
+PATH_BEFORE=(
+    # custom bin in this repo, i.e. bin/custom
+    $HOME/dotfiles/bin/custom
+    # Opkg bin and sbin directories 在这添加
+    /opt/bin
+    /opt/sbin
+)
 ```
 
 效果
@@ -164,11 +183,11 @@ NAME               TYPE       SIZE USED PRIO
 
 ## 安装 Docker
 
-先去应用中心安装 Docker 。默认绿联的Docker 配置比较烂，而且还会在根目录下留下一个 `/daemon.json` 的文件夹（WTF？），一看就是安装脚本写错了。
+先去应用中心安装 Docker 。默认绿联的Docker 配置比较烂，而且还会在根目录下留下一个 `/daemon.json` 的文件夹（WTF？），一看就是绿联的安装脚本写错了。
 
 ```bash
 # 删除错误的 daemon.json 文件夹
-rm -rf /daemon.json
+rmdir /daemon.json
 ```
 
 将以下json写入 `/etc/docker/daemon.json`：
