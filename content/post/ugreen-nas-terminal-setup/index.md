@@ -18,7 +18,7 @@ tags:
 
 去绿联NAS的Web管理界面，控制面板 -> 终端机 -> SSH ，记得关闭自动关闭功能。
 
-![ssh](./images/ssh.png)
+![ssh](images/ssh.png)
 
 ## 配置 root 用户 SSH 登录
 
@@ -113,7 +113,7 @@ zsh # 询问 use proxy 的时候选择 n （因为前面set过了），询问切
 
 效果
 
-![zsh](./images/zsh.png)
+![zsh](images/zsh.png)
 
 ## 优化 Zram
 
@@ -121,7 +121,7 @@ zsh # 询问 use proxy 的时候选择 n （因为前面set过了），询问切
 
 绿联默认的 zram 不够激进，关了它。我们要用 lzo-rle 算法和一半的内存来做zram，榨干内存。
 
-![zramoff](./images/zramoff.png)
+![zramoff](images/zramoff.png)
 
 ```bash
 # 先设置代理，等会要从 GitHub 上下载文件
