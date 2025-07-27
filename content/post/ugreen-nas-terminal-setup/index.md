@@ -1,5 +1,5 @@
 ---
-title: [Chinese-Only] 一个Linux用户的绿联NAS配置指南
+title: (Chinese-Only) 一个Linux用户的绿联NAS配置指南
 description: 如何在绿联NAS上配置舒适的终端，尽量避免干扰NAS本身，以及各类优化与可观测配置。
 date: 2025-07-27 16:45:00+0800
 categories:
