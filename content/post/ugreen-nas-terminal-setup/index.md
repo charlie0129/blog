@@ -72,10 +72,10 @@ sed -i 's|-O /opt/etc/opkg.conf|-O /opt/etc/opkg.conf \&\& sed -i "s,http://bin.
 /bin/sh opkg-install.sh
 
 # 临时设置 PATH ，使得 opkg 命令可用
-export PATH=/opt/bin:/opt/sbin:$PATH
+export PATH=/opt/bin:/opt/sbin:/opt/usr/bin:$PATH
 # 设置 PATH ，使得 opkg 命令可用。如果你用 zsh，记得改成 ~/.zshrc 。
 # 或者如果你用我的 dotfiles，现在可以先不做这一步，你可以看后续我配置 zsh 的时候怎么做的。
-echo 'export PATH=/opt/bin:/opt/sbin:$PATH' >> ~/.bashrc
+echo 'export PATH=/opt/bin:/opt/sbin:/opt/usr/bin:$PATH' >> ~/.bashrc
 ```
 
 ## 安装常用Package
@@ -124,9 +124,10 @@ vim ~/dotfiles/env/custom.sh
 PATH_BEFORE=(
     # custom bin in this repo, i.e. bin/custom
     $HOME/dotfiles/bin/custom
-    # Opkg bin and sbin directories 在这添加
+    # Opkg bin and sbin directories
     /opt/bin
     /opt/sbin
+    /opt/usr/bin
 )
 ```
 
@@ -138,7 +139,7 @@ PATH_BEFORE=(
 
 > 需要使用 root 用户
 
-绿联默认的 zram 不够激进，关了它。我们要用 lzo-rle 算法和一半的内存来做zram，榨干内存。
+绿联默认的 zram 不够激进，关了它。我们要用 zstd 算法和一半的内存来做zram，榨干内存。
 
 ![zramoff](images/zramoff.png)
 
@@ -152,12 +153,12 @@ cd ..
 rm -rf zram-swap
 ```
 
-配置使用 lzo-rle 算法：
+配置使用 zstd 算法（因为 Debian 13 里面默认 zram 不给 lzo-rle 算法了，lz4 的压缩率又不行，所以用 zstd ）：
 
 ```bash
 vim /etc/default/zram-swap
 # 修改以下行
-# _zram_algorithm="lzo-rle"
+# _zram_algorithm="zstd"
 systemctl restart zram-swap
 ```
 
