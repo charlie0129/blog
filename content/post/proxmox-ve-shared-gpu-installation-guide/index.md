@@ -15,10 +15,6 @@ tags:
     - Containerization
 ---
 
-[toc]
-
-
-
 ## Introduction
 
 Most schools and universities in China have a limited number of GPU servers (often only one or two, or even none). This makes the management of GPU development machines quite different than corporation which have virtually unlimited GPU servers.
