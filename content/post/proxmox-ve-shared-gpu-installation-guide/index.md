@@ -400,16 +400,36 @@ Persistence mode will:
 
 - Keep the GPU driver running so program can start faster
 - Lower GPU power mode when it's idle to save power. For RTX 4090s, it can drop from ~70W to ~10W.
-- Make sure `/dev/nvidia*` nodes are ready. This is useful because we are passing the GPU devices `/dev/nvidia*` to CTs (LXC Containers) later, it requires the device nodes to be present on start up for auto-started CTs.
+- Make sure `/dev/nvidia*` device nodes are ready. This is useful because we are passing the GPU devices `/dev/nvidia*` to CTs (LXC Containers) later, it requires the device nodes to be present on start up for auto-started CTs.
 
 So you really should enable it.
 
+To enable persistence mode:
+
 ```bash
-cd /usr/share/doc/NVIDIA_GLX-1.0/samples
-tar jxf nvidia-persistenced-init.tar.bz2
-cd nvidia-persistenced-init
-./install.sh
+/usr/bin/nvidia-smi -pm 1
 ```
+
+To make it persistent across reboots, we will use a cron job.
+
+```bash
+crontab -e
+```
+
+Add a line to run `nvidia-smi` on boot:
+
+```bash
+@reboot /usr/bin/nvidia-smi -pm 1 >/dev/null 2>&1
+```
+
+> Why not use `nvidia-persistenced` systemd service? Because for whatever reason, it does not initialize the device nodes `/dev/nvidia*` correctly, so auto-started CTs will encounter `Cuda failure 'unknown error'`.
+>
+> ```bash
+> cd /usr/share/doc/NVIDIA_GLX-1.0/samples
+> tar jxf nvidia-persistenced-init.tar.bz2
+> cd nvidia-persistenced-init
+> ./install.sh
+> ```
 
 You should feel `nvidia-smi` runs much faster than before.
 
