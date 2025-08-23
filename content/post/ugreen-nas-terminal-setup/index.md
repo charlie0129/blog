@@ -156,13 +156,11 @@ rm -rf zram-swap
 配置使用 zstd 算法（因为 Debian 13 里面默认 zram 不给 lzo-rle 算法了，lz4 的压缩率又不行，所以用 zstd ）：
 
 ```bash
-vim /etc/default/zram-swap
-# 修改以下行
-# _zram_algorithm="zstd"
+sed -i 's/_zram_algorithm=.*/_zram_algorithm="zstd"/g' /etc/default/zram-swap
 systemctl restart zram-swap
 ```
 
-为 zram 配置合适的 sysctl ，较大的 `swappiness` 值可以不活跃的页面更快地被交换出去，让内存留给更有用的页面。
+为 zram 配置合适的 sysctl ，较大的 `swappiness` 值可以不活跃的页面更快地被交换出去，让内存留给更有用的页面。因为 sysctl.conf 里面绿联已经设置了 vm.swappiness 如果放在 `/etc/sysctl.d/` 里面会被覆盖掉，所以直接放在 sysctl.conf 里面。
 
 ```bash
 echo '# ZRAM BEGIN' >> /etc/sysctl.conf
