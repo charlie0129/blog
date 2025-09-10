@@ -15,6 +15,9 @@ hasCJKLanguage = false
 # Change it to your Disqus shortname before using
 # disqusShortname = "charlie0129"
 
+# Image conversion takes time
+timeout = 600
+
 [pagination]
 pagerSize = 5
 
