@@ -21,3 +21,5 @@ pagerSize = 5
 [imaging]
 # The default box filter looks like shit.
 resampleFilter = "lanczos"
+hint = "photo"
+quality = 75

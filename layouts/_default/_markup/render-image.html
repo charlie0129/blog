@@ -1,0 +1,56 @@
+{{- $image := .Page.Resources.GetMatch (printf "%s" (.Destination | safeURL)) -}}
+{{- $Permalink := .Destination | relURL | safeURL -}}
+{{- $alt := .PlainText | safeHTML -}}
+{{- $Width := 0 -}}
+{{- $Height := 0 -}}
+{{- $Srcset := "" -}}
+
+{{/* SVG and external images won't work with gallery layout, because their width and height attributes are unknown */}}
+{{- $galleryImage := false -}}
+
+{{- if $image -}}
+	{{- $notSVG := ne (path.Ext .Destination) ".svg" -}}
+	{{- $Permalink = $image.RelPermalink -}}
+
+	{{- if $notSVG -}}
+		{{- $Width = $image.Width -}}
+		{{- $Height = $image.Height -}}
+		{{- $galleryImage = true -}}
+
+		{{- if (default true .Page.Site.Params.imageProcessing.content.enabled) -}}
+			{{/* Dynamic responsive image generation without upscaling.
+			   1. Only generate resized variants whose widths are strictly less than the original.
+			   2. Always append the original size (webp + jpg) as the last entries.
+			   3. Keep webp before jpg for each width so webp is preferred when browser picks among identical width candidates. */}}
+			{{- $candidateWidths := slice 480 1024 1536 2048 2560 -}}
+			{{- $srcEntries := slice -}}
+			{{- range $w := $candidateWidths -}}
+				{{- if lt $w $Width -}}
+					{{- $webp := $image.Resize (printf "%dx webp" $w) -}}
+					{{- $jpg := $image.Resize (printf "%dx jpg" $w) -}}
+					{{- $srcEntries = $srcEntries | append (printf "%s %dw" $webp.RelPermalink $w) | append (printf "%s %dw" $jpg.RelPermalink $w) -}}
+				{{- end -}}
+			{{- end -}}
+			{{/* Original size (no upscale). We still run through Resize at identical width to ensure consistent derivative naming & format conversion. */}}
+			{{- $origWebp := $image.Resize (printf "%dx webp" $Width) -}}
+			{{- $origJpg := $image.Resize (printf "%dx jpg" $Width) -}}
+			{{- $srcEntries = $srcEntries | append (printf "%s %dw" $origWebp.RelPermalink $Width) | append (printf "%s %dw" $origJpg.RelPermalink $Width) -}}
+			{{- $Srcset = delimit $srcEntries ", " -}}
+		{{- end -}}
+	{{- end -}}
+{{- end -}}
+
+<img src="{{ $Permalink }}"
+	{{ with $Width }}width="{{ . }}"{{ end }}
+	{{ with $Height }}height="{{ . }}"{{ end }}
+	{{ with $Srcset }}srcset="{{ . }}"{{ end }}
+	loading="lazy"
+	{{ with $alt }}
+		alt="{{ . }}"
+	{{ end }}
+	{{ if $galleryImage }}
+		class="gallery-image" 
+		data-flex-grow="{{ div (mul $image.Width 100) $image.Height }}"
+		data-flex-basis="{{ div (mul $image.Width 240) $image.Height }}px"
+	{{ end }}
+>
