@@ -1,6 +1,7 @@
 ---
 title: RTX4090 GPUDirect P2P Unlocked!
 description: NVIDIA disables the GPUDirect P2P capability on RTX4090 GPUs. Here's how to unlock it and enable blazing fast data transfers between GPUs.
+slug: rtx4090-p2p-unlocked
 date: 2025-02-07 11:18:00+0800
 categories:
     - GPU

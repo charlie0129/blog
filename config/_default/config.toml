@@ -17,3 +17,7 @@ hasCJKLanguage = false
 
 [pagination]
 pagerSize = 5
+
+[imaging]
+# The default box filter looks like shit.
+resampleFilter = "lanczos"
