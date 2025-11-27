@@ -43,7 +43,7 @@ For example, if you want to use port `14999`, change the line to:
 "stableEndpoints": ["xxx.xxx.xxx.xxx/14999"]
 ```
 
-Generate the moon configuration:
+Generate the moon configuration (this is what clients will use to connect to your moon):
 
 ```bash
 zerotier-idtool genmoon /var/lib/zerotier-one/moon.json
@@ -56,9 +56,9 @@ mkdir -p /var/lib/zerotier-one/moons.d/
 mv *.moon /var/lib/zerotier-one/moons.d/
 ```
 
-If your moon also acts as a client, change the client configuration to use the non-standard port. Edit the `local.conf` file:
+If your moon also acts as a client, change the client configuration to use the non-standard port. Edit `/var/lib/zerotier-one/local.conf`:
 
-```bash
+```json
 {
     "settings": {
         "primaryPort": 14999
@@ -76,14 +76,20 @@ systemctl restart zerotier-one
 
 On the client side, you have to change the default port as well. Yes, the client's default port (9993) must match the moon's port. Otherwise, they won't be able to communicate in my tests.
 
-After you installed ZeroTier and joined the network, edit the `local.conf` file:
+After you installed ZeroTier and joined the network, edit `/var/lib/zerotier-one/local.conf`:
 
-```bash
+```json
 {
     "settings": {
         "primaryPort": 14999
     }
 }
+```
+
+Copy `/var/lib/zerotier-one/moons.d/*.moon` from the moon server to the client machine's `/var/lib/zerotier-one/moons.d/` directory, so the client knows about the moon:
+
+```bash
+scp "user@moon-server:/var/lib/zerotier-one/moons.d/*.moon" /var/lib/zerotier-one/moons.d/
 ```
 
 Restart the ZeroTier service on the client:
