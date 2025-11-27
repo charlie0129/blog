@@ -250,6 +250,16 @@ sysctl --system
 systemctl restart networking
 ```
 
+### TRIM Optimizations
+
+TRIM will help prolong SSD lifespan and maintain performance. Enable it on the LVM thin pool.
+
+```bash
+sed -i 's/.*issue_discards = .*/\tissue_discards = 1/g' /etc/lvm/lvm.conf
+```
+
+Since LXCs are just on the host, it will automatically issue discards if the underlying storage supports it, so no further action is needed. If you are using VM, be sure to use SCSI disks (VirtIO SCSI Single) with `discard=on` option. I've heard that VirtIO Block devices will not work with dicards but I haven't tested it yet. Correct me if I'm wrong.
+
 ### Limit Journal Size
 
 ```bash
@@ -462,7 +472,7 @@ EOF
 
 All following commands should be run in the CT unless specified otherwise.
 
-Add Docker configuration, limit log size to prevent logs from some evil container eating up all storage space.
+Add Docker configuration. Systemd journal is used as log driver to make use of previously configured journal size limit. By writing logs to a centralized location, it's also useful if you want to write logs to memory to reduce disk writes (e.g. log2ram).
 
 ```bash
 mkdir -p /etc/docker/
@@ -471,9 +481,7 @@ cat <<EOF > /etc/docker/daemon.json
   "live-restore": true,
   "storage-driver": "overlay2",
   "experimental": true,
-  "log-opts": {
-    "max-size": "2m"
-  }
+  "log-driver": "journald"
 }
 EOF
 ```
