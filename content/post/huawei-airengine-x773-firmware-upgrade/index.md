@@ -1,7 +1,7 @@
 ---
 title: (Chinese Only) 华为 AirEngine 5773-21 升级固件指南
-description: 华为 AirEngine 5773-21 只有 FIT 模式，没有 FAT 模式 、Leader AP 功能，需要升级固件到 V600R024C10 及以上版本。作为踩坑记录。
-slug: huawei-airengine-x773-setup
+description: 买了台华为 AirEngine 5773-21 发现只有 FIT 模式，没有 FAT 模式 、Leader AP 功能，需要升级固件到 V600R024C10 及以上版本。本文作为踩坑记录。
+slug: huawei-airengine-x773-firmware-upgrade
 date: 2025-12-13 16:00:00+0800
 categories:
     - Networking
