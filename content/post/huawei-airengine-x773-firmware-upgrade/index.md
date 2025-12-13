@@ -48,7 +48,9 @@ tags:
 
 按道理华为 Wi-Fi 6 系列（比如 AirEngine 5761 ）都是可以直接登录 Web 管理页面的，Wi-Fi 7 更新不应该不行，而且官方 AirEngine 5773-21 的[彩页](https://e.huawei.com/cn/material/enterprise/5d5164cf207149b0b210988b1bb7996d)中也说可以用做 FAT AP / Leader AP ，怎么回事？
 
-我后面用 SSH 登录设备（后面会说怎么登录），发现没有说当前是 FIT 还是 FAT 模式（老的 AP 会在 SSH 登录的时候就提示）。输入 `edit-config` 尝试修改配置，发现提示没有权限。WTF？我管理员还能没权限？后面才知道，原来没有权限其实代表当前 AP 在 FIT 模式下（这报错给用户带来多少困扰），必须切换到 FAT 模式才有权限修改配置。那么问题来了，我都没权限做任何配置，我怎么切换到 FAT 模式（况且我也没找到切换 FAT 模式的命令）？
+我后面用 SSH 登录设备（后面会说怎么登录），没有说当前是 FIT 还是 FAT 模式（老的 AP 会在 SSH 登录的时候就提示）。而且这个命令行看的我一脸懵，老的 Wi-Fi 6 AP 都是直接 `system-view` 就能配置，然后命令也是传统的那一套。这新的 AP 一上来就是个 `MDCLI>` 提示符（一看就是新搞的东西，里面的命令也完全变了，我根本没时间去学习这些新命令。（后面才知道，必须升级系统后，用 `switch cli` 从 MC-CLI 切换到传统 CLI 模式，才能用老的命令行方式配置，但是建议还是用新的 MD-CLI ，因为传统 CLI 里面基本没啥功能了）
+
+看了一圈文档，说可以输入 `edit-config` 修改配置，然后发现提示没有权限。WTF？我管理员还能没权限？后面才知道，原来没有权限其实代表当前 AP 在 FIT 模式下（这报错给用户带来多少困扰），必须切换到 FAT 模式才有权限修改配置。那么问题来了，我都没权限做任何配置，我怎么切换到 FAT 模式（况且我也没找到切换 FAT 模式的命令）？
 
 后面折腾一圈才发现（各种根据文档中的蛛丝马迹去猜），是我当前固件版本太老了（`V600R023C10`），华为并没有在早期固件中实现 FAT AP / Leader AP 功能（设备都发布了，功能还没做好是吧），必须升级到 `V600R024C10` 及以上版本才有该功能，写文章时最新版本 是 `V600R025C00` 。OK，问题找到，接下来就是升级固件了。
 
@@ -233,7 +235,7 @@ MDCLI> display cfg/startup-infos
   "startup-info": [
     {
       "position": "0",
-      "configed-system-software": "AirEngineX773_V600R023C10SPC200.cc",
+      "configed-system-software": "AirEngineX773_V600R023C10SPC200.cc", # 是的，华为拼错单词了
       "current-system-software": "AirEngineX773_V600R023C10SPC200.cc",
       "next-system-software": "AirEngineX773_V600R023C10SPC200.cc",  # 发现还是老的版本
       "current-cfg-file": "",
@@ -388,3 +390,35 @@ MDCLI> display patch/patch-infos
 你也可以在 Web 管理界面上查看补丁是否安装成功。
 
 ![补丁安装成功](images/patch-webui.png)
+
+## Bonus: 启用 IPv6
+
+我发现 AP 下面的设备获取不到 IPv6 地址（我内网中 IPv6 配置都是正确的），基本上肯定是在 AP 导致的 IPv6 地址无法下发。
+
+后面了解华为 AP 默认不开 IPv6 报文转发。原因是：华为认为 IPv4 是主流，在 IPv4 网络中，如果存在较多 IPv6 协议报文，会影响无线网络性能，也会损耗设备的 CPU 处理能力。因此在纯 IPv4 网络中，可以通过不处理 IPv6 无线报文来提高 IPv4 网络性能。
+
+不过，我就是要用 IPv6 ，因此要去把 WLAN 处理 IPv6 报文的功能打开（ Web UI 没有，要命令行开），SSH 登录设备，执行以下命令：
+
+> 官方文档里面其实有这个，但是我找半天没找到，在：“参考-MD-CLI配置参考-WLAN配置-WLAN用户管理” 里面。不是，你把 IPv6 相关配置放在“用户管理”里面？这跟用户管理有啥关系？
+
+```
+[admin@HUAWEI]
+MDCLI> edit-config
+
+[(gl)admin@HUAWEI]
+MDCLI> wlan-sta-access
+
+[(gl)admin@HUAWEI]/wlan-sta-access
+MDCLI> sta-ipv6-switch true
+
+[*(gl)admin@HUAWEI]/wlan-sta-access
+MDCLI> commit
+```
+
+之后你的设备应该就能正确收发 IPv6 报文了。
+
+## 结语
+
+这告诉我们， AirEngine 5773-21 这种 Wi-Fi 7 新设备，还是太新了，所有的坑都得自己踩。与 Wi-Fi 6 的设备比如 AirEngine 5761 相比网上大把教程还是差太远了。不过也算是积累了一些经验，后续再买多台 AP 的时候就不会再踩这些坑了。
+
+这次单台 AP 就放北京用了，年底回老家再配置多 AP 组网方案。
