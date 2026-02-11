@@ -154,6 +154,9 @@ MDCLI> display ftpc/transfer-tasks                           # 检查是否备�
 ### 下载新固件
 
 ```
+[admin@HUAWEI]
+MDCLI> download-upgrade-package
+
 [(x)admin@HUAWEI]/download-upgrade-package
 MDCLI> base-software-directory AirEngineX773_V600R024C10SPC100.cc # 新固件文件名，注意要和 FTP 服务器上一致
 
