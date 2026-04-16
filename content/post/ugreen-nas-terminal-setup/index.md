@@ -199,7 +199,6 @@ rmdir /daemon.json
   },
   "experimental": true,
   "metrics-addr": "0.0.0.0:8132",
-  "storage-driver": "overlay2",
   "data-root": "<your-data-root>",
   "registry-mirrors": [
     "https://xxxxxx.com/dockerhub/",
@@ -210,7 +209,6 @@ rmdir /daemon.json
 - `log-opts`：限制日志大小，防止日志占满磁盘。
 - `experimental`：启用实验性功能。
 - `metrics-addr`：设置可观测端口。
-- `storage-driver`：使用 overlay2 存储驱动。
 - `data-root`：设置 Docker 数据目录，建议查看你之前的 `/etc/docker/daemon.json` 中的配置，不要动。
 - `registry-mirrors`：设置 Docker 镜像加速器，建议使用国内的镜像源。
 

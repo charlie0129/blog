@@ -479,7 +479,6 @@ mkdir -p /etc/docker/
 cat <<EOF > /etc/docker/daemon.json
 {
   "live-restore": true,
-  "storage-driver": "overlay2",
   "experimental": true,
   "log-driver": "journald"
 }
