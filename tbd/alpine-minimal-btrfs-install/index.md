@@ -133,13 +133,16 @@ qemu-img convert -f raw -c -p -O qcow2 /dev/mapper/ex950-vm--300--disk--0 300.qc
 
 ## Post-Installation Tips
 
-### SSH Root Login and Port Forwarding
+### SSH Server
 
-Enable root login and port forwarding in `/etc/ssh/sshd_config`:
+- Enable root login and port forwarding
+- A dead connection gets cleaned up in ~3 minutes instead of 2+ hours (kernel TCP keepalive)
 
 ```text
 PermitRootLogin yes
 AllowTcpForwarding yes
+ClientAliveInterval 60
+ClientAliveCountMax 3
 ```
 
 ### Enable Community Repositories
@@ -230,7 +233,17 @@ This should have been configured during the initial setup, but if you need to se
 
 ```bash
 apk add chrony
-vi /etc/chrony/chrony.conf # use `ntp.aliyun.com` if you are in China, `pool.ntp.org` is not accessible from China
+vi /etc/chrony/chrony.conf 
+# use `ntp.aliyun.com` if you are in China, `pool.ntp.org` is not accessible from China
+# Also add `makestep 1.0 -1` to allow chrony to correct large time offsets on startup, which is common in VMs. (You can remove the default `initstepslew xxx`)
+#
+# Should look like this:
+#   pool ntp.aliyun.com iburst
+#   driftfile /var/lib/chrony/chrony.drift
+#   rtcsync
+#   cmdport 0
+#   makestep 1.0 -1
+
 rc-update add chronyd
 rc-service chronyd start
 ```
@@ -240,26 +253,20 @@ rc-service chronyd start
 Alpine has no built-in log rotation. To prevent logs from filling up the disk, use a simple script that rotates log files larger than 4M.
 
 The script:
-- Only rotates files larger than 1M.
+- Only rotates files larger than 4M.
 - Copies current content to `.0` file (one backup copy). No need to compress the backup since it's already compressed on disk by btrfs transparent compression.
 - Truncates original file to zero (daemons can continue writing)
 - Logs rotation events using `logger`
-
-Make sure you install `coreutils` so that `cp` has `--reflink=auto` support, which allows for almost instant copy on Btrfs using CoW.
-
-```
-apk add coreutils
-```
 
 ```bash
 cat <<'EOF' > /etc/periodic/hourly/logtruncate
 #!/bin/sh
 
-# Rotate log files larger than 1M
+# Rotate log files larger than 4M
 # Keeps one .0 backup and truncates original
 
 LOG_DIR="/var/log"
-MAX_SIZE=$((1 * 1024 * 1024))  # 1M in bytes
+MAX_SIZE=$((4 * 1024 * 1024))  # 4M in bytes
 
 find "$LOG_DIR" -type f ! -name '*.0' | while read -r file; do
     # Get current file size (works with both GNU and busybox stat)
@@ -270,17 +277,10 @@ find "$LOG_DIR" -type f ! -name '*.0' | while read -r file; do
         logger -t logrotate "Rotating $file ($size bytes)"
 
         # Copy current content to .0 backup (overwrites old backup)
-        cp --reflink=auto "$file" "$file.0"
+        cp "$file" "$file.0"
 
         # Truncate original to zero (preserves inode)
         truncate -s 0 "$file"
-
-        # Compress the backup file using btrfs compression.
-        # The original file is already compressed on disk by btrfs since we mounted with compression enabled, but we
-        # still want to compress it again because the original file is append-write'd so the compression ratio is
-        # not good (typically 80%-90%). By compressing it again, we can achieve ~8x better compression ratio.
-        # Note that it uses btrfs transparent compression, so the file looks the same.
-        btrfs filesystem defragment -czstd -L9 "$file.0"
 
         logger -t logrotate "Rotated $file (backup: $file.0)"
     fi
@@ -294,6 +294,19 @@ Since we have our own log rotation script, we can configure `syslog` to not worr
 
 ```bash
 sed -i 's/^SYSLOGD_OPTS=.*/SYSLOGD_OPTS="-t -s 0"/' /etc/conf.d/syslog
+```
+
+### Clean APK cache regularly
+
+APK stores installed packages in /var/cache/apk. It makes sense to clean it regularly.
+
+```bash
+cat <<'EOF' > /etc/periodic/daily/apkcacheclean
+#!/bin/sh
+find /var/cache/apk -type f -name '*.apk' -mtime +7 -delete
+EOF
+
+chmod +x /etc/periodic/daily/apkcacheclean
 ```
 
 ### Timezone
@@ -317,6 +330,10 @@ cat <<EOF > /etc/init.d/zerotier-one
 depend() {
     after network-online
     want cgroups
+}
+
+start_pre() {
+    /sbin/modprobe tun
 }
 
 supervisor=supervise-daemon
@@ -345,9 +362,223 @@ Podman is lightweight (no-daemon, much lighter runtime, no dockerd/containerd/(p
 ```bash
 apk add podman
 # Note that we will keep the overlay storage driver since it is more stable and has better performance, even though we have Btrfs as the underlying filesystem.
+# Limix max log size to 1M to prevent filling up the disk with container logs.
+sed -i 's/^#log_size_max =.*/log_size_max = 1048576/' /etc/containers/containers.conf
 # Enable cgroupsv2 for better compatibility with modern container runtimes.
 rc-update add cgroups
 rc-service cgroups start
 # Start containers with restart policy set to always or unless-stopped.
 rc-update add podman
+rc-service podman start
 ```
+
+If you want docker / docker compose compatibility, you can also install docker cli.
+
+> Why not use podman-docker or podman-compose? These packages are just shims that call the podman binary, they lack much features, especially for docker compose.
+
+```bash
+apk add docker-cli docker-cli-compose
+
+docker context create podman --docker "host=unix:///run/podman/podman.sock"
+docker context use podman
+```
+
+### Expand root partition on first boot
+
+After you restore the QCOW2 image to a larger disk, you should expand the root partition to use the new space.
+
+> Why not use growpart? growpart may end up with a partition that is not properly aligned (e.g., partition sectors not multiples of 8 or 2048), which can cause performance issues.
+
+```bash
+fdisk /dev/vda
+```
+
+Press these keys exactly:
+
+```
+p        # print (double-check start sector of vda2, e.g., 133120)
+d        # delete partition
+2        # select vda2
+
+n        # new partition
+p        # primary
+2        # partition number 2
+<ENTER>  # start sector (should be the same as before, e.g., 133120)
+<ENTER>  # default end (use full disk)
+
+> If asked:
+>   Partition #2 contains a btrfs signature.
+>   Do you want to remove the signature? [Y]es/[N]o:
+
+N        # DO NOT remove the signature.
+
+p        # print (verify the new partition layout, vda2 should start at the same sector and use the rest of the disk). Make sure Sectors count of the new vda2 is a multiple of 2048 for better performance.
+
+w        # write changes
+```
+
+Tell kernel to re-read the partition table:
+
+```bash
+partprobe
+```
+
+Verify size changed:
+
+```bash
+lsblk
+```
+
+Resize Btrfs:
+
+```bash
+btrfs filesystem resize max /
+```
+
+Confirm:
+
+```bash
+df -h /
+```
+
+### Use BBR congestion control
+
+For better network performance, especially in high-latency or lossy environments.
+
+```bash
+echo "net.core.default_qdisc = fq" > /etc/sysctl.d/02-bbr.conf
+echo "net.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.d/02-bbr.conf
+sysctl -p /etc/sysctl.d/02-bbr.conf
+```
+
+### UFW
+
+Useful if your service provider does not give you a firewall so you need to set up your own firewall rules to restrict access to certain ports.
+
+```bash
+apk add ip6tables ufw
+# Start ufw later since we need to set up rules first before enabling it.
+
+# Default policies
+ufw default deny incoming
+ufw default allow outgoing
+
+# Allow loopback
+ufw allow in on lo
+
+# -------------------------
+# SSH
+# -------------------------
+
+# SSH port (change if you use a non-standard port)
+ufw allow 22/tcp comment 'SSH'
+
+# Optional: rate limit SSH brute force
+# ufw limit 22/tcp
+
+# -------------------------
+# Private / intranet ranges
+# -------------------------
+
+# RFC1918 IPv4
+ufw allow from 10.0.0.0/8
+ufw allow from 172.16.0.0/12
+ufw allow from 192.168.0.0/16
+
+# Optional CGNAT range
+# ufw allow from 100.64.0.0/10
+
+# Optional IPv6 ULA
+ufw allow from fc00::/7
+
+# Also allow forwarding to RFC1918 and ULA ranges if you use this server as a gateway or VPN server, or
+# to use Podman containers (because if you publish ports to the host, they will through DNAT, which
+# is handled by forward rules).
+#
+# Note that if you are using Podman containers with published ports, 
+# this will allow access to all published ports (even if your input rules only allow certain ports).
+# If this is not what you want, only allow certain ports here.
+ufw route allow to 10.0.0.0/8
+ufw route allow to 172.16.0.0/12
+ufw route allow to 192.168.0.0/16
+ufw route allow to fc00::/7
+
+# -------------------------
+# Public services
+# -------------------------
+
+# Web
+# ufw allow 80/tcp
+# ufw allow 443/tcp
+# ufw allow 443/udp
+
+# Example app ports
+# ufw allow 3000/tcp
+# ufw allow 9090/tcp
+
+# -------------------------
+# Logging
+# -------------------------
+
+ufw logging low
+
+# Enable firewall
+ufw enable
+
+rc-update add ufw
+rc-service ufw start
+```
+
+### Common utils
+
+Make Alpine feel much closer to Debian/Ubuntu/CentOS.
+
+```bash
+apk add bash coreutils findutils grep sed gawk diffutils procps util-linux shadow curl wget iproute2 bind-tools gcompat pciutils
+apk add netcat-openbsd socat tcpdump iftop iptraf-ng ethtool traceroute zsh git htop tmux vim less jq iperf3 sysstat rsync
+```
+
+### sshguard
+
+> I avoided using fail2ban since it is a python-based daemon that can consume a lot of memory on a minimal system. sshguard is a lightweight alternative written in C.
+
+```bash
+apk add sshguard nftables
+
+# DO NOT run `rc-update add nftables && rc-service nftables start`
+# as it will add a default deny all rule that locks you out of the system. We will start nftables with an empty ruleset and let sshguard manage the rules.
+
+mkdir -p /var/lib/sshguard
+
+cat <<EOF > /etc/sshguard.conf
+#!/bin/sh
+# Full path to backend executable (required, no default)
+BACKEND='/usr/libexec/sshg-fw-nft-sets'
+
+# Space-separated list of log files to monitor. (optional, no default)
+FILES='/var/log/messages'
+
+# Block attackers when their cumulative attack score exceeds THRESHOLD.
+# Most attacks have a score of 10. (optional, default 30)
+THRESHOLD=20
+
+# Block attackers for initially BLOCK_TIME seconds after exceeding THRESHOLD.
+# Subsequent blocks increase by a factor of 1.5. (optional, default 120)
+BLOCK_TIME=180
+
+# Remember potential attackers for up to DETECTION_TIME seconds before
+# resetting their score. (optional, default 1800)
+DETECTION_TIME=3600
+
+# Attackers are permanently blacklisted when their cumulative score exceeds threshold.
+BLACKLIST_FILE=100:/var/lib/sshguard/blacklist.db
+
+# Size of IPv6 'subnet to block. Defaults to a single address, CIDR notation. (optional, default to 128)
+IPV6_SUBNET=48
+
+# Size of IPv4 subnet to block. Defaults to a single address, CIDR notation. (optional, default to 32)
+IPV4_SUBNET=24
+EOF
+
+rc-update add sshguard
+rc-service sshguard start
