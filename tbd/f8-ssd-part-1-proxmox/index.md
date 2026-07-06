@@ -162,8 +162,6 @@ cd zram-swap
 cd ..
 rm -rf zram-swap
 
-sed -i 's/_zram_algorithm=.*/_zram_algorithm="zstd"/g' /etc/default/zram-swap
-
 systemctl restart zram-swap
 
 cat <<EOF > /etc/sysctl.d/zram.conf
@@ -175,6 +173,15 @@ EOF
 
 
 sysctl --system
+```
+
+
+sshd
+
+```text
+AllowTcpForwarding yes
+ClientAliveInterval 60
+ClientAliveCountMax 3
 ```
 
 

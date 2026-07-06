@@ -198,7 +198,7 @@ cd ..
 rm -rf zram-swap
 ```
 
-Change config to use zstd as the compression method.
+The default lz4 is a good balance between speed and compression ratio. If you want to sacrifice speed for better compression, you can change the config to use zstd as the compression method.
 
 ```bash
 sed -i 's/_zram_algorithm=.*/_zram_algorithm="zstd"/g' /etc/default/zram-swap
