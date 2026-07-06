@@ -1024,6 +1024,14 @@ rc-update add sshd default
 rc-service sshd start
 ```
 
+Add this to `/etc/ssh/sshd_config`:
+
+```text
+PermitRootLogin yes
+ClientAliveInterval 60
+ClientAliveCountMax 3
+```
+
 Install Podman inside the CT:
 
 ```bash
