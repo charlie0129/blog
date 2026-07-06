@@ -41,11 +41,17 @@ The final layout is:
 | Partition | Size | Filesystem | Mountpoint |
 | --- | ---: | --- | --- |
 | `/dev/vda1` | 64 MB | ext4 | `/boot` |
-| `/dev/vda2` | Rest of disk | Btrfs | `/` |
+| `/dev/vda2` | Rest of disk (~500MB is fine) | Btrfs | `/` |
 
 64 MB is enough for this single-kernel Alpine image. If you plan to keep multiple kernels or use a larger bootloader setup, use 128 MB instead.
 
+Before you start installing, create a VM with a ~512MB disk (yes, really). CPU and RAM can be small, because the install process is not resource-intensive. After the install, you can resize the disk to 1 GB or larger.
+
+Always go with a small disk first because the disk image can be expanded easily, but shrinking a disk is not trivial.
+
 ## Start Alpine Setup
+
+Download the latest Alpine ISO from [https://alpinelinux.org/downloads/](https://alpinelinux.org/downloads/). I usually use the `x86_64` architecture and the `virtual` variant. As this will be used in virtualized environments, the `virt` kernel is smaller.
 
 Boot the Alpine ISO and log in as `root`. The live environment has no root password by default.
 
