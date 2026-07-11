@@ -593,6 +593,29 @@ pct set 199 -mp0 /mnt/scratch_test,mp=/mnt/scratch_test
 
 If your workload is random-write heavy and can fit on one SSD, skip RAID0 and LVM entirely. A single raw disk or single partition is often better for small random writes than a layered RAID0 + LVM-thin setup.
 
+### Using Scratch Storage in VMs and CTs
+
+For VMs, add a virtual disk on the scratch pool. Enable discard and SSD emulation on the virtual disk. Inside the guest, enable periodic TRIM. When formatting the disk, make sure the filesystem is aligned to the underlying ZFS volsize or LVM stripe geometry. For example, if underlying ZFS volsize is 16K, use `mkfs.ext4 -O bigalloc -C 16384 /dev/yourdisk`. If the underlying storage is LVM+RAID, use the correct `stride` and `stripe-width` options when formatting.
+
+For CTs, add a mountpoint on the scratch pool. ZFS mountpoints are automatically aligned. For LVM+RAID, make sure the filesystem is aligned to the underlying geometry. TRIM is handled by the host for ZFS mountpoints. For LVM+RAID, run `pct fstrim` on the CT.
+
+To use the scratch pool for temporary data, you can use bind-mounts to mount common scratch directories to scratch disk mountpoints. This avoids changing the config for each applications such as Docker, containerd and etc.
+
+Suppose the scratch disk is mounted at `/mnt/unsafe`, and you want to use it for Docker, containerd, and ~/.cache. Write the following lines in `/etc/fstab`:
+
+```
+/mnt/unsafe/docker  /var/lib/docker none    rbind    0   0
+/mnt/unsafe/containerd   /var/lib/containerd     none    rbind    0   0
+/mnt/unsafe/.cache  /root/.cache    none    rbind    0   0
+```
+
+```bash
+mkdir -p /mnt/unsafe/{docker,containerd,.cache}
+rm -rf /var/lib/docker /var/lib/containerd /root/.cache
+mkdir -p /var/lib/docker /var/lib/containerd /root/.cache
+mount -av
+```
+
 ## TRIM
 
 For ZFS pools:
