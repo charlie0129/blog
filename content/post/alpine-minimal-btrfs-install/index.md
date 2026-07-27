@@ -823,7 +823,7 @@ This is no longer minimal, but it makes Alpine feel closer to a general-purpose 
 
 ```bash
 apk add bash coreutils findutils grep sed gawk diffutils procps util-linux shadow curl wget iproute2 bind-tools gcompat pciutils
-apk add netcat-openbsd socat tcpdump iftop iptraf-ng ethtool traceroute zsh git htop tmux vim less jq iperf3 sysstat rsync
+apk add netcat-openbsd socat tcpdump iftop iptraf-ng ethtool traceroute zsh git htop tmux vim less jq iperf3 sysstat rsync file
 ```
 
 ## Final Notes

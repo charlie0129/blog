@@ -724,6 +724,21 @@ src=<public-ipv4>:51514     dst=1.1.1.1:443
 
 Linux conntrack records that translation so the reply can be translated back and forwarded to the CT.
 
+There is a Proxmox-specific caveat when the firewall is enabled on a VM or CT network interface (`firewall=1`). Proxmox places that interface behind an `fwbr*` firewall bridge. With bridge netfilter enabled, conntrack can record the connection while it crosses the firewall bridge, before it reaches the host's normal NAT path. The later `FORWARD` rule can accept the packet, but `POSTROUTING` may reuse the already tracked non-NATed connection instead of attaching MASQUERADE or SNAT. The packet then leaves the public interface with its private source address and never receives a reply.
+
+Put the firewall-bridge tracking in a separate conntrack zone by adding these hooks to the `vmbr0` stanza in `/etc/network/interfaces`:
+
+```text
+    post-up   iptables -t raw -C PREROUTING -i fwbr+ -j CT --zone 1 2>/dev/null || iptables -t raw -I PREROUTING -i fwbr+ -j CT --zone 1
+    post-down iptables -t raw -D PREROUTING -i fwbr+ -j CT --zone 1 2>/dev/null || true
+    post-up   ip6tables -t raw -C PREROUTING -i fwbr+ -j CT --zone 1 2>/dev/null || ip6tables -t raw -I PREROUTING -i fwbr+ -j CT --zone 1
+    post-down ip6tables -t raw -D PREROUTING -i fwbr+ -j CT --zone 1 2>/dev/null || true
+```
+
+The `-C`/`||` guard matters on a dual-stack `vmbr0`: ifupdown2 can run the hook once for each address family.
+
+The IPv4 rules cover MASQUERADE/SNAT, while the IPv6 rules are also needed when using NAT66. A characteristic symptom is that NAT works for a guest without the Proxmox interface firewall but fails for an otherwise identical firewall-enabled guest. In conntrack output, the broken flow's reply destination remains the guest's private address instead of the host's public address. Allowing all `OUT` and `FORWARD` traffic does not fix it because this is a conntrack/NAT-path problem, not a filter-policy rejection.
+
 Inbound port forwarding is DNAT. A client connects to the public server:
 
 ```text
@@ -1042,7 +1057,7 @@ I keep public-facing services in a separate CT and forward only selected ports f
 Create an unprivileged Alpine CT on `vmbr0`, then:
 
 ```bash
-apk add openssh-server
+apk add openssh openssh-server
 rc-update add sshd default
 rc-service sshd start
 ```
