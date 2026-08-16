@@ -43,33 +43,12 @@ The final layout is:
 | `/dev/vda1` | 64 MB | ext4 | `/boot` |
 | `/dev/vda2` | Rest of disk (~500MB is fine) | Btrfs | `/` |
 
-64 MB is enough for this single-kernel Alpine image. If you plan to keep multiple kernels or use a larger bootloader setup, use 128 MB instead.
+64 MB is enough for this single-kernel Alpine image. The boot partition usage should be around 30M with Alpine 3.23 virt kernel (6.18). If you plan to keep multiple kernels or use a larger bootloader setup, use 128 MB instead.
 
 Before you start installing, create a VM with a ~512MB disk (yes, really). CPU and RAM can be small, because the install process is not resource-intensive. After the install, you can resize the disk to 1 GB or larger.
 
 Always go with a small disk first because the disk image can be expanded easily, but shrinking a disk is not trivial.
 
-## Start Alpine Setup
-
-Download the latest Alpine ISO from [https://alpinelinux.org/downloads/](https://alpinelinux.org/downloads/). I usually use the `x86_64` architecture and the `virtual` variant. As this will be used in virtualized environments, the `virt` kernel is smaller.
-
-Boot the Alpine ISO and log in as `root`. The live environment has no root password by default.
-
-Run the normal installer first:[^setup-alpine]
-
-```bash
-setup-alpine
-```
-
-Answer the usual questions for keyboard, hostname, network, DNS, root password, timezone, mirror, SSH, and NTP. I usually choose `chrony` for NTP.
-
-When it asks which disk to use, type:
-
-```text
-none
-```
-
-This keeps the base configuration but skips automatic partitioning and formatting. For the later diskless-mode prompts, also choose `none` for local backup storage and apk cache.
 
 ## Partition The Disk
 
@@ -122,7 +101,30 @@ Check that the kernel sees the new partitions:
 ls -l /dev/vda*
 ```
 
-If `/dev/vda1` and `/dev/vda2` do not appear, reboot the live ISO, run `setup-alpine` again up to the disk prompt, choose `none`, and continue from here. Alpine's manual disk setup docs also recommend rebooting after manual partition creation when needed.[^manual-disk]
+If `/dev/vda1` and `/dev/vda2` do not appear, reboot the live ISO. Alpine's manual disk setup docs also recommend rebooting after manual partition creation when needed.[^manual-disk]
+
+## Start Alpine Setup
+
+Download the latest Alpine ISO from [https://alpinelinux.org/downloads/](https://alpinelinux.org/downloads/). I usually use the `x86_64` architecture and the `virtual` variant. As this will be used in virtualized environments, the `virt` kernel is smaller.
+
+Boot the Alpine ISO and log in as `root`. The live environment has no root password by default.
+
+Run the normal installer first:[^setup-alpine]
+
+```bash
+setup-alpine
+```
+
+Answer the usual questions for keyboard, hostname, network, DNS, root password, timezone, mirror, SSH, and NTP. I usually choose `chrony` for NTP.
+
+When it asks which disk to use, type:
+
+```text
+none
+```
+
+This keeps the base configuration but skips automatic partitioning and formatting. For the later diskless-mode prompts, also choose `none` for configs. You can keep the default apk cache dir (`/var/cache/apk`).
+
 
 ## Format And Mount
 
@@ -142,8 +144,9 @@ mkfs.btrfs -f -L alpine-root "$ROOT"
 Mount root with compression enabled:
 
 ```bash
+# adjust the compression level as desired. zstd:1 is fast and has reasonable compression. zstd:3 is slower but compresses better. Any higher level is usually overkill and comes with diminishing returns.
 mount -t btrfs -o rw,relatime,compress=zstd:3,ssd,discard=async,space_cache=v2 "$ROOT" /mnt
-btrfs property set /mnt compression zstd
+btrfs property set /mnt compression zstd:3
 
 mkdir -p /mnt/boot
 mount -t ext4 "$BOOT" /mnt/boot
@@ -178,7 +181,7 @@ vi /mnt/etc/fstab
 The root entry should include Btrfs compression. Mine looks like this:
 
 ```text
-UUID=...  /      btrfs  rw,relatime,compress=zstd:3,ssd,discard=async,space_cache=v2  0 1
+UUID=...  /      btrfs  rw,relatime,compress=zstd:3,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/  0 1
 UUID=...  /boot  ext4   rw,relatime                                                 0 2
 ```
 
@@ -822,8 +825,14 @@ rc-service sshguard start
 This is no longer minimal, but it makes Alpine feel closer to a general-purpose server if you find busybox too limited:
 
 ```bash
-apk add bash coreutils findutils grep sed gawk diffutils procps util-linux shadow curl wget iproute2 bind-tools gcompat pciutils
+apk add bash coreutils findutils tar grep sed gawk diffutils procps util-linux shadow curl wget iproute2 bind-tools gcompat pciutils
 apk add netcat-openbsd socat tcpdump iftop iptraf-ng ethtool traceroute zsh git htop tmux vim less jq iperf3 sysstat rsync file
+```
+
+And other tools
+
+```bash
+apk add bat dufs gdu lsd yazi
 ```
 
 ## Final Notes
