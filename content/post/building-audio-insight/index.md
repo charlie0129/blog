@@ -60,6 +60,8 @@ The workers publish immutable snapshots. The UI reads the newest complete snapsh
 
 All five visualizations share one Metal canvas, drawable, command buffer, and render pass. JUCE supplies the plugin shell and cross-format plumbing, while the visual layer is native Metal. Coordinates and layout use logical points, and drawable and text resources follow the current backing scale. The implementation is therefore designed to support both regular-density and Retina displays, including live backing-scale changes.
 
+Both paths are highly optimized. The shared transform uses `juce::dsp::FFT`, which selects Apple's Accelerate/vDSP implementation on macOS, and Spectrum and Spectrogram reuse each calibrated result. On the GPU side, the Spectrogram stores calibrated dB in a circular 16-bit-float (`R16Float`) texture: scrolling remaps texture coordinates, while shader controls recolor retained history without another FFT or a whole-texture copy. High display cadence therefore does not multiply the default 60 Hz FFT workload.
+
 When the editor is closed, there is nothing to display, so capture, analysis, history, display-link callbacks, and Metal submissions stop. Audio still passes through normally. Reopening the editor begins fresh rather than silently spending host resources on invisible history.
 
 ## Turning samples into pictures
