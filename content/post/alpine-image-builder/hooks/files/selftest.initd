@@ -1,0 +1,430 @@
+#!/sbin/openrc-run
+#
+# Installed as /etc/init.d/selftest by the 99-selftest hook, which also writes
+# the expectations it reads from /etc/selftest.conf.
+#
+# Everything here runs on the booted machine, so it is an ordinary shell
+# script rather than something quoted into a heredoc.
+#
+# shellcheck shell=sh
+# shellcheck disable=SC2034  # description and depend() are read by openrc
+# shellcheck disable=SC1091  # /etc/selftest.conf is generated at build time
+
+description="Check the image against its build-time configuration"
+
+depend() {
+	# Last, so that everything it inspects has had a chance to start.
+	# shellcheck disable=SC2035  # openrc's own syntax for "every service"
+	after *
+}
+
+# --- plumbing --------------------------------------------------------------
+
+PASS=0
+FAIL=0
+
+# check <label> <command> [args...]
+#
+# The command is run directly rather than eval'd, which is what keeps the
+# checks below free of nested quoting. Anything needing a pipeline or a
+# comparison gets a named predicate in the next section instead.
+check() {
+	label=$1
+	shift
+	if "$@" >/dev/null 2>&1; then
+		PASS=$((PASS + 1))
+		printf '  ok   %s\n' "$label"
+	else
+		FAIL=$((FAIL + 1))
+		printf '  FAIL %s\n' "$label"
+	fi
+}
+
+# A check that does not apply to this configuration.
+skip() { printf '  --   %s\n' "$1"; }
+
+# Context that is worth reading even when nothing failed.
+info() { printf '  info %s\n' "$1"; }
+
+# --- predicates ------------------------------------------------------------
+#
+# Every one of these is a plain command returning 0 or 1, so a call site reads
+# the same way `test` does.
+
+not() { ! "$@"; }
+
+# output_is <expected> <command> [args...]
+output_is() {
+	_want=$1
+	shift
+	[ "$("$@" 2>/dev/null)" = "$_want" ]
+}
+
+# mount_field <mountpoint> <field>   (1 = device, 3 = fstype, 4 = options)
+mount_field() {
+	awk -v mnt="$1" -v f="$2" '$2 == mnt { print $f }' /proc/mounts
+}
+
+fstype_is() { [ "$(mount_field "$1" 3)" = "$2" ]; }
+has_mount_opt() { mount_field "$1" 4 | tr ',' '\n' | grep -qx "$2"; }
+
+hook_enabled() {
+	case " $EXPECT_HOOKS " in
+	*" $1 "*) return 0 ;;
+	esac
+	return 1
+}
+
+svc_started() { rc-service "$1" status 2>/dev/null | grep -q started; }
+in_runlevel() { rc-update show 2>/dev/null | grep -qE "^ *$1 +\|"; }
+
+# sshd_effective <keyword> <value> -- against sshd's parsed config, not the file
+sshd_effective() { sshd -T 2>/dev/null | grep -qix "$1 $2"; }
+
+listening_on() { netstat -ltn 2>/dev/null | grep -qE ":$1 +"; }
+
+mode_is() { [ "$(stat -c %a "$2" 2>/dev/null)" = "$1" ]; }
+
+# symlink_to <target> <link>
+symlink_to() { [ -L "$2" ] && [ "$(readlink "$2")" = "$1" ]; }
+
+iface_has_ipv4() { ip -4 addr show "$1" 2>/dev/null | grep -q 'inet '; }
+
+root_is_writable() { touch /.selftest && rm -f /.selftest; }
+
+# Not `not ls -A`: ls exits 0 on an empty directory, so that reads correctly
+# and means the opposite.
+dir_is_empty() { [ -z "$(ls -A "$1" 2>/dev/null)" ]; }
+
+# Anything created after the image was stamped was created on this machine,
+# which is the whole point of the firstboot service.
+created_after_build() {
+	[ "$(stat -c %Y "$1" 2>/dev/null)" -gt "$(stat -c %Y /etc/image-release)" ]
+}
+
+any_host_key() { ls /etc/ssh/ssh_host_*_key >/dev/null 2>&1; }
+
+zram_swap_active() { grep -q '^/dev/zram' /proc/swaps; }
+tmp_on_zram() { mount_field /tmp 1 | grep -q zram; }
+
+# login_shell_is <user> <shell> -- <shell> is a name or an absolute path, the
+# same two forms DOTFILES_SHELL accepts.
+login_shell_is() {
+	_have=$(awk -F: -v u="$1" '$1 == u { print $7 }' /etc/passwd)
+	case "$2" in
+	/*) [ "$_have" = "$2" ] ;;
+	*) [ "${_have##*/}" = "$2" ] ;;
+	esac
+}
+
+# The one check that exercises the whole dotfiles chain on this machine: an
+# interactive zsh has to start and source the repo's .zshrc, which means finding
+# every zsh4humans plugin already in the cache -- z4h's auto-update is off, so
+# nothing here is allowed to reach for the network. HOME is set explicitly
+# because an OpenRC service does not inherit one, and 95-dotfiles only ever
+# configures root.
+zsh_loads_dotfiles() {
+	[ "$(HOME=/root zsh -i -c 'print -r -- $DOTFILES_ROOT' </dev/null 2>/dev/null)" = "$1" ]
+}
+
+# zram compresses, so the device is sized as a fraction of RAM at boot rather
+# than to a fixed number. Allow 20% of slack for rounding and for the few MiB
+# already accounted elsewhere.
+zram_swap_sized_right() {
+	_ram=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
+	_swap=$(awk '/^\/dev\/zram/ { s += $3 } END { print s + 0 }' /proc/swaps)
+	_want=$((_ram * EXPECT_ZRAM_RATIO / 100))
+	[ "$_swap" -gt $((_want * 80 / 100)) ] &&
+		[ "$_swap" -lt $((_want * 120 / 100)) ]
+}
+
+# Whatever the disk size turned out to be, the root filesystem should be using
+# nearly all of the partition it sits in. df -k rather than df --output, which
+# busybox does not have.
+#
+# The tolerance is deliberately not a plain percentage. What df calls "Size"
+# excludes reserved blocks and fixed metadata -- the ext4 journal and inode
+# tables, the xfs log -- and that cost barely moves with the partition size, so
+# as a *fraction* it grows as the disk shrinks. On a 445M root partition df
+# reports 445.0M for btrfs, 400.5M for ext4 and 381.0M for xfs; the same three
+# filesystems on a 957M partition report 100%, 96.5% and 93.3%. A 90% threshold
+# passes at one size and fails at the other while nothing is actually wrong.
+#
+# The failure this is looking for is not marginal: a root that did not grow is a
+# 445M filesystem in a 4G partition. So allow the larger of 96 MiB and 10%,
+# which covers every filesystem's fixed overhead at the small end and its
+# proportional overhead at the large end.
+root_fs_fills_partition() {
+	_dev=$(mount_field / 1)
+	_sectors=$(cat "/sys/class/block/${_dev##*/}/size")
+	_kib=$(df -k / | awk 'NR > 1 { print $2; exit }')
+	_gap=$((_sectors / 2 - _kib))
+	_slack=$((_sectors / 2 / 10))
+	[ "$_slack" -lt $((96 * 1024)) ] && _slack=$((96 * 1024))
+	[ "$_gap" -le "$_slack" ]
+}
+
+# --- the report ------------------------------------------------------------
+
+start() {
+	# Straight to the console: testboot.sh reads the serial log, and this
+	# has to show up even when syslog is the thing that is broken.
+	exec >/dev/console 2>&1
+
+	. /etc/selftest.conf
+
+	echo "===== SELFTEST BEGIN ====="
+
+	echo "-- identity"
+	# Printed, not just checked: testmatrix.sh boots the same image twice
+	# and compares these lines to prove the de-identification worked.
+	info "machine-id=$(cat /etc/machine-id 2>/dev/null)"
+	for key in /etc/ssh/ssh_host_*_key.pub; do
+		[ -e "$key" ] || continue
+		info "hostkey=$(ssh-keygen -lf "$key" | awk '{ print $2, $4 }')"
+	done
+	check "hostname is $EXPECT_HOSTNAME" output_is "$EXPECT_HOSTNAME" hostname
+	check "machine-id is populated" test -s /etc/machine-id
+	check "machine-id is 32 hex digits" \
+		grep -qE '^[0-9a-f]{32}$' /etc/machine-id
+	check "/etc/image-release exists" test -s /etc/image-release
+	check "timezone is $EXPECT_TIMEZONE" \
+		output_is "$EXPECT_TIMEZONE" cat /etc/timezone
+
+	echo "-- filesystems"
+	# Printed because a failed mount-option check is meaningless without
+	# knowing what the kernel actually settled on: several filesystems
+	# normalise, add or quietly downgrade options at mount time.
+	info "root options=$(mount_field / 4)"
+	check "root is $EXPECT_ROOT_FS" fstype_is / "$EXPECT_ROOT_FS"
+	check "/boot is $EXPECT_BOOT_FS" fstype_is /boot "$EXPECT_BOOT_FS"
+	check "root is writable" root_is_writable
+	# Every option from the config has to have survived into the live mount.
+	for opt in $(echo "$EXPECT_ROOT_OPTS" | tr ',' ' '); do
+		case "$opt" in
+		rw | ro) continue ;;    # implied by the mount itself
+		subvol=*) continue ;;   # the kernel rewrites it; checked below
+		esac
+		check "root mounted with $opt" has_mount_opt / "$opt"
+	done
+	if [ -n "$EXPECT_SUBVOL" ]; then
+		# /proc/mounts reports the subvolume path, so "@" comes back "/@".
+		check "root is subvolume $EXPECT_SUBVOL" \
+			has_mount_opt / "subvol=/$EXPECT_SUBVOL"
+	else
+		skip "btrfs subvolume (not configured)"
+	fi
+	check "fstab references root by UUID" grep -qE '^UUID=.* / ' /etc/fstab
+	check "fstab references /boot by UUID" grep -qE '^UUID=.* /boot ' /etc/fstab
+	# Installed for every ROOT_FS: a btrfs root trims itself via discard=async,
+	# but a data disk mounted later probably will not.  Running it is the point
+	# of the second check -- the job is generated from a heredoc at build time,
+	# so a quoting mistake in its awk would otherwise go unnoticed until some
+	# Sunday months from now.
+	check "weekly fstrim job installed" test -x /etc/periodic/weekly/fstrim
+	check "weekly fstrim job runs cleanly" /etc/periodic/weekly/fstrim
+
+	echo "-- boot"
+	info "kernel=$(uname -r)"
+	info "cmdline=$(cat /proc/cmdline)"
+	check "cmdline knows the root fs" \
+		grep -q "rootfstype=$EXPECT_ROOT_FS" /proc/cmdline
+	check "initramfs modules include $EXPECT_ROOT_FS" \
+		grep -qE "modules=[^ ]*$EXPECT_ROOT_FS" /proc/cmdline
+	check "cmdline is not quiet" not grep -qw quiet /proc/cmdline
+	check "grub.cfg present" test -s /boot/grub/grub.cfg
+	if [ -n "$EXPECT_SERIAL" ]; then
+		tty=${EXPECT_SERIAL%%,*}
+		check "console on $tty" \
+			grep -q "console=$EXPECT_SERIAL" /proc/cmdline
+		check "getty on $tty in inittab" \
+			grep -qE "^$tty::respawn" /etc/inittab
+		# Without this, root login on the serial console is refused and
+		# looks exactly like a wrong password.
+		check "$tty in securetty" grep -qx "$tty" /etc/securetty
+	else
+		skip "serial console (not configured)"
+	fi
+
+	echo "-- hooks"
+
+	if hook_enabled 10-network; then
+		check "10-network: $EXPECT_IFACE configured" \
+			grep -qE "^iface $EXPECT_IFACE inet" /etc/network/interfaces
+		check "10-network: method is $EXPECT_NETWORK" \
+			grep -qE "^iface $EXPECT_IFACE inet $EXPECT_NETWORK" \
+			/etc/network/interfaces
+		check "10-network: networking started" svc_started networking
+		check "10-network: $EXPECT_IFACE has an address" \
+			iface_has_ipv4 "$EXPECT_IFACE"
+	else
+		skip "10-network (disabled)"
+	fi
+
+	if hook_enabled 20-ssh; then
+		check "20-ssh: sshd installed" command -v sshd
+		check "20-ssh: sshd started" svc_started sshd
+		check "20-ssh: port is $EXPECT_SSH_PORT" \
+			sshd_effective port "$EXPECT_SSH_PORT"
+		check "20-ssh: PermitRootLogin is $EXPECT_SSH_ROOT" \
+			sshd_effective permitrootlogin "$EXPECT_SSH_ROOT"
+		check "20-ssh: ClientAliveInterval is 60" \
+			sshd_effective clientaliveinterval 60
+		check "20-ssh: listening on $EXPECT_SSH_PORT" \
+			listening_on "$EXPECT_SSH_PORT"
+		if [ -n "$EXPECT_SSH_KEYS" ]; then
+			check "20-ssh: authorized_keys installed" \
+				test -s /root/.ssh/authorized_keys
+			check "20-ssh: authorized_keys is 0600" \
+				mode_is 600 /root/.ssh/authorized_keys
+		else
+			skip "20-ssh: authorized_keys (none configured)"
+		fi
+	else
+		skip "20-ssh (disabled)"
+	fi
+
+	if hook_enabled 30-chrony; then
+		check "30-chrony: chronyd started" svc_started chronyd
+		check "30-chrony: pool is $EXPECT_NTP" \
+			grep -qE "^(pool|server) $EXPECT_NTP" /etc/chrony/chrony.conf
+		check "30-chrony: makestep configured" \
+			grep -q '^makestep' /etc/chrony/chrony.conf
+	else
+		skip "30-chrony (disabled)"
+	fi
+
+	if hook_enabled 40-zram; then
+		check "40-zram: swap is on zram" zram_swap_active
+		check "40-zram: swap is ~$EXPECT_ZRAM_RATIO% of RAM" \
+			zram_swap_sized_right
+		if [ "$EXPECT_ZRAM_TMP" = yes ]; then
+			check "40-zram: /tmp is on zram" tmp_on_zram
+			check "40-zram: no tmpfs /tmp left in fstab" \
+				not grep -qE '^tmpfs[[:space:]]+/tmp' /etc/fstab
+		else
+			skip "40-zram: /tmp on zram (disabled)"
+		fi
+	else
+		skip "40-zram (disabled)"
+	fi
+
+	if hook_enabled 50-logtruncate; then
+		check "50-logtruncate: hourly job installed" \
+			test -x /etc/periodic/hourly/logtruncate
+		check "50-logtruncate: crond started" svc_started crond
+		check "50-logtruncate: syslogd rotation disabled" \
+			grep -q 's 0' /etc/conf.d/syslog
+		check "50-logtruncate: apk cache cleaner installed" \
+			test -x /etc/periodic/daily/apkcacheclean
+	else
+		skip "50-logtruncate (disabled)"
+	fi
+
+	if hook_enabled 60-sysctl; then
+		check "60-sysctl: sysctl service started" svc_started sysctl
+		check "60-sysctl: vm.swappiness is 180" \
+			output_is 180 sysctl -n vm.swappiness
+		check "60-sysctl: vm.page-cluster is 0" \
+			output_is 0 sysctl -n vm.page-cluster
+		if [ "$EXPECT_BBR" = yes ]; then
+			check "60-sysctl: congestion control is bbr" \
+				output_is bbr sysctl -n net.ipv4.tcp_congestion_control
+			check "60-sysctl: qdisc is fq" \
+				output_is fq sysctl -n net.core.default_qdisc
+		else
+			skip "60-sysctl: BBR (disabled)"
+		fi
+	else
+		skip "60-sysctl (disabled)"
+	fi
+
+	if hook_enabled 70-growroot; then
+		check "70-growroot: growpart installed" command -v growpart
+		check "70-growroot: ran once" test -f /var/lib/misc/growroot.done
+		check "70-growroot: removed itself from the default runlevel" \
+			not in_runlevel growroot
+		check "70-growroot: root fs fills the partition" \
+			root_fs_fills_partition
+	else
+		skip "70-growroot (disabled)"
+	fi
+
+	if hook_enabled 80-firstboot; then
+		check "80-firstboot: host keys generated" any_host_key
+		check "80-firstboot: ed25519 host key present" \
+			test -s /etc/ssh/ssh_host_ed25519_key
+		check "80-firstboot: host key is not the build host's" \
+			created_after_build /etc/ssh/ssh_host_ed25519_key
+	else
+		skip "80-firstboot (disabled)"
+	fi
+
+	if hook_enabled 91-ufw; then
+		check "91-ufw: ufw enabled" grep -q '^ENABLED=yes' /etc/ufw/ufw.conf
+		check "91-ufw: service in the default runlevel" in_runlevel ufw
+	else
+		skip "91-ufw (disabled)"
+	fi
+
+	if hook_enabled 93-podman; then
+		check "93-podman: podman installed" command -v podman
+		check "93-podman: cgroups v2 mounted" fstype_is /sys/fs/cgroup cgroup2
+		check "93-podman: service in the default runlevel" in_runlevel podman
+		check "93-podman: docker CLI installed" command -v docker
+		check "93-podman: /run/docker.sock points at podman's socket" \
+			symlink_to /run/podman/podman.sock /run/docker.sock
+		# The one that would have caught the bug the two checks above only
+		# describe: ask the CLI, with no shell configuration of any kind, to
+		# fetch something only the server can answer.
+		check "93-podman: the docker CLI reaches the podman API" \
+			docker version --format '{{.Server.Version}}'
+	else
+		skip "93-podman (disabled)"
+	fi
+
+	if hook_enabled 95-dotfiles; then
+		check "95-dotfiles: repo cloned" \
+			test -d "$EXPECT_DOTFILES_DIR/.git"
+		check "95-dotfiles: .zshrc links into the repo" \
+			output_is "$EXPECT_DOTFILES_DIR/.zshrc" readlink /root/.zshrc
+		check "95-dotfiles: lsd installed" command -v lsd
+		if [ -n "$EXPECT_DOTFILES_SHELL" ]; then
+			check "95-dotfiles: root's shell is $EXPECT_DOTFILES_SHELL" \
+				login_shell_is root "$EXPECT_DOTFILES_SHELL"
+		else
+			skip "95-dotfiles: login shell (not configured)"
+		fi
+		if [ "$EXPECT_DOTFILES_Z4H" = yes ]; then
+			check "95-dotfiles: zsh4humans installed" \
+				test -r /root/.cache/zsh4humans/v5/zsh4humans/main.zsh
+			check "95-dotfiles: interactive zsh loads them" \
+				zsh_loads_dotfiles "$EXPECT_DOTFILES_DIR"
+		else
+			skip "95-dotfiles: zsh4humans (disabled)"
+		fi
+	else
+		skip "95-dotfiles (disabled)"
+	fi
+
+	echo "-- hygiene"
+	# resolv.conf is deliberately not checked here: DHCP has already
+	# overwritten whatever the image shipped by the time this runs, so a
+	# guest-side check cannot tell a clean image from a leaky one.
+	check "apk cache is empty" dir_is_empty /var/cache/apk
+	check "no shell history" not test -e /root/.ash_history
+	check "no build scratch left behind" not test -e /tmp/mkalpine
+	# latest-stable in here would make a future "apk upgrade" jump releases.
+	check "repositories pinned to $EXPECT_BRANCH" \
+		grep -q "/$EXPECT_BRANCH/main" /etc/apk/repositories
+	check "repositories do not track latest-stable" \
+		not grep -q latest-stable /etc/apk/repositories
+
+	echo "-- sizing"
+	df -h / /boot 2>/dev/null | sed 's/^/  /'
+	free -m | sed 's/^/  /'
+
+	echo "SELFTEST RESULT: $PASS passed, $FAIL failed"
+	echo "===== SELFTEST END ====="
+	return 0
+}

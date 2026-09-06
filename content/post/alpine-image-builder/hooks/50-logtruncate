@@ -1,0 +1,46 @@
+#!/bin/sh
+# 50-logtruncate - cap log growth without a full rotation stack.
+#
+# Alpine installs no logrotate by default. On a 1 GB disk a tiny periodic
+# script that keeps one backup and truncates in place is enough, and
+# truncating (rather than renaming) preserves the inode so daemons keep
+# writing to the same open file descriptor.
+set -eu
+
+cat >/etc/periodic/hourly/logtruncate <<'EOF'
+#!/bin/sh
+
+# Rotate log files larger than 4M.
+# Keep one .0 backup and truncate the original in place.
+
+LOG_DIR="/var/log"
+MAX_SIZE=$((4 * 1024 * 1024))  # 4M in bytes
+
+find "$LOG_DIR" -type f ! -name '*.0' | while read -r file; do
+    # Works with both GNU and BusyBox stat.
+    size=$(stat -c %s "$file" 2>/dev/null || stat -f %z "$file" 2>/dev/null || echo 0)
+
+    if [ "$size" -gt "$MAX_SIZE" ]; then
+        logger -t logtruncate "Rotating $file ($size bytes)"
+
+        # Copy current content to .0 backup, overwriting the old backup.
+        cp "$file" "$file.0"
+
+        # Preserve the inode so daemons can continue writing.
+        truncate -s 0 "$file"
+
+        logger -t logtruncate "Rotated $file (backup: $file.0)"
+    fi
+done
+EOF
+chmod +x /etc/periodic/hourly/logtruncate
+
+# Tell BusyBox syslog not to rotate by itself; the script above owns that now.
+sed -i 's/^SYSLOGD_OPTS=.*/SYSLOGD_OPTS="-t -s 0"/' /etc/conf.d/syslog
+
+cat >/etc/periodic/daily/apkcacheclean <<'EOF'
+#!/bin/sh
+find /var/cache/apk -type f -name '*.apk' -mtime +7 -delete
+find /var/cache/apk -type f -name '*.tar.gz' -mtime +90 -delete
+EOF
+chmod +x /etc/periodic/daily/apkcacheclean

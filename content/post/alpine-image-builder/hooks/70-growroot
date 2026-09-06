@@ -1,0 +1,77 @@
+#!/bin/sh
+# 70-growroot - grow the root partition and filesystem to fill the disk on
+# first boot.
+#
+# The image is built small on purpose, so it has to grow into whatever disk
+# it lands on.
+set -eu
+
+# growpart rather than a hand-rolled sfdisk: growing a GPT disk also requires
+# relocating the backup header to the new end of the device, and growpart
+# keeps the partition's *start* sector untouched, so whatever alignment the
+# image was built with survives.
+apk add --quiet --no-progress cloud-utils-growpart sfdisk util-linux-misc
+
+cat >/etc/init.d/growroot <<'EOF'
+#!/sbin/openrc-run
+
+description="Grow the root partition and filesystem to fill the disk"
+
+stamp=/var/lib/misc/growroot.done
+
+depend() {
+	need localmount
+	after bootmisc
+}
+
+start() {
+	if [ -e "$stamp" ]; then
+		return 0
+	fi
+
+	root_src=$(awk '$2 == "/" { print $1; exit }' /proc/mounts)
+	case "$root_src" in
+	/dev/*) ;;
+	*)
+		ewarn "cannot work out the root device from /proc/mounts ($root_src)"
+		return 0
+		;;
+	esac
+
+	name=${root_src#/dev/}
+	if [ ! -e "/sys/class/block/$name/partition" ]; then
+		einfo "root is not on a partition, nothing to grow"
+		mkdir -p "$(dirname "$stamp")" && touch "$stamp"
+		return 0
+	fi
+
+	partnum=$(cat "/sys/class/block/$name/partition")
+	# /sys/class/block/vda2 -> .../block/vda/vda2, so the parent directory
+	# is the whole disk. Works for nvme0n1p2 and sda2 alike.
+	disk=/dev/$(basename "$(dirname "$(readlink -f "/sys/class/block/$name")")")
+
+	ebegin "Growing $disk partition $partnum"
+	# growpart exits 1 and says NOCHANGE when the partition already fills
+	# the disk, which is the normal case from the second boot onwards.
+	growpart "$disk" "$partnum" || true
+	eend 0
+
+	ebegin "Growing the root filesystem"
+	case "$(awk '$2 == "/" { print $3; exit }' /proc/mounts)" in
+	btrfs) btrfs filesystem resize max / ;;
+	ext4 | ext3 | ext2) resize2fs "$root_src" ;;
+	xfs) xfs_growfs / ;;
+	*) ewarn "unknown root filesystem, not resizing" ;;
+	esac
+	eend $?
+
+	mkdir -p "$(dirname "$stamp")"
+	date -u +%Y-%m-%dT%H:%M:%SZ >"$stamp"
+
+	# One shot. Remove ourselves so this never runs again.
+	rc-update del growroot default 2>/dev/null || true
+}
+EOF
+
+chmod +x /etc/init.d/growroot
+rc-update add growroot default >/dev/null

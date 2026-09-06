@@ -1,0 +1,42 @@
+#!/bin/sh
+# 20-ssh - openssh, root login policy, authorized keys.
+set -eu
+
+apk add --quiet --no-progress openssh
+
+CFG=/etc/ssh/sshd_config
+
+# OpenSSH takes the *first* value for a keyword, so appending to the file does
+# not override anything. Rewrite the existing (usually commented) line
+# instead, and only append when the keyword is genuinely absent.
+sshd_set() {
+	_key=$1
+	shift
+	if grep -qE "^[[:space:]]*#?[[:space:]]*${_key}[[:space:]]" "$CFG"; then
+		sed -i -E "s|^[[:space:]]*#?[[:space:]]*${_key}[[:space:]].*|${_key} $*|" "$CFG"
+	else
+		printf '%s %s\n' "$_key" "$*" >>"$CFG"
+	fi
+}
+
+# prohibit-password allows key auth for root but not password auth. Set
+# SSH_PERMIT_ROOT_LOGIN=yes if this is a private box on a trusted network.
+sshd_set PermitRootLogin "$SSH_PERMIT_ROOT_LOGIN"
+sshd_set Port "$SSH_PORT"
+sshd_set AllowTcpForwarding yes
+
+# Dead forwarding sessions disappear after roughly three minutes instead of
+# hanging around for the TCP timeout.
+sshd_set ClientAliveInterval 60
+sshd_set ClientAliveCountMax 3
+
+if [ -n "$SSH_AUTHORIZED_KEYS" ]; then
+	mkdir -p /root/.ssh
+	chmod 700 /root/.ssh
+	printf '%s\n' "$SSH_AUTHORIZED_KEYS" >>/root/.ssh/authorized_keys
+	chmod 600 /root/.ssh/authorized_keys
+fi
+
+# Host keys are deliberately NOT generated here: they would be identical in
+# every VM cloned from this image. 80-firstboot creates them on first boot.
+rc-update add sshd default >/dev/null

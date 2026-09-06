@@ -1,0 +1,80 @@
+#!/bin/sh
+# 93-podman - containers without a daemon stack.
+#
+# Podman over Docker on a tiny VM: no containerd, crun instead of runc, and
+# nothing running when no container is running.
+set -eu
+
+apk add --quiet --no-progress podman
+
+# Keep the overlay storage driver. It is more stable and faster for
+# containers than btrfs-on-btrfs, even when the host filesystem is Btrfs.
+#
+# Cap container logs at 1M so a chatty container cannot fill the disk.
+sed -i 's/^#\?log_size_max =.*/log_size_max = 1048576/' /etc/containers/containers.conf
+
+# cgroups v2, for compatibility with modern container runtimes.
+rc-update add cgroups default >/dev/null
+
+# Starts containers whose restart policy is always or unless-stopped.
+rc-update add podman default >/dev/null
+
+# Docker CLI compatibility against the Podman socket. podman-docker and
+# podman-compose exist, but the real Docker CLI is closer to what existing
+# compose files expect.
+apk add --quiet --no-progress docker-cli docker-cli-compose
+
+# Alpine's podman service runs "podman system service" and listens on
+# /run/podman/podman.sock. The Docker CLI dials /var/run/docker.sock, so all
+# that is missing is a link between the two.
+#
+# Doing it this way, rather than with a "docker context" or a DOCKER_HOST
+# export, is deliberate. Both of those live in a shell: a context is state under
+# $HOME that has to be created per user, and an export has to come from a
+# startup file. Neither survives contact with the two things that actually
+# matter here --
+#
+#   - "ssh host docker ps" runs a non-interactive, non-login shell, which reads
+#     no profile at all. Any solution that lives in /etc/profile.d is invisible
+#     to every script, cron job and remote command on the machine.
+#   - /etc/profile.d is not even read by all *logins*. With 95-dotfiles, root's
+#     shell is zsh, which reads /etc/profile only because Alpine's
+#     /etc/zsh/zprofile sources it -- and zsh4humans' ~/.zshenv runs
+#     "setopt no_global_rcs" before that file would be read, so it never is.
+#     This is the bug that shipped in an earlier version of this hook: an image
+#     with both hooks enabled came up with the Docker CLI still on its default
+#     context, pointing at a socket that does not exist.
+#
+# A path on the filesystem has none of those problems. It works for every user,
+# every shell and no shell at all.
+#
+# /run is a tmpfs, so the link cannot be baked into the image: it has to be
+# made at boot, by a service ordered after the one that creates the socket.
+cat >/etc/init.d/docker-sock <<'EOF'
+#!/sbin/openrc-run
+
+description="Expose Podman's API socket at the Docker CLI's default path"
+
+depend() {
+	need podman
+}
+
+start() {
+	if [ -e /run/docker.sock ] && [ ! -L /run/docker.sock ]; then
+		ewarn "/run/docker.sock exists and is not a symlink, leaving it alone"
+		return 0
+	fi
+	ebegin "Linking /run/docker.sock to /run/podman/podman.sock"
+	ln -sfn /run/podman/podman.sock /run/docker.sock
+	eend $?
+}
+
+stop() {
+	if [ -L /run/docker.sock ]; then
+		rm -f /run/docker.sock
+	fi
+}
+EOF
+
+chmod +x /etc/init.d/docker-sock
+rc-update add docker-sock default >/dev/null

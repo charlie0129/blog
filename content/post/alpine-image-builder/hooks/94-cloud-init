@@ -1,0 +1,23 @@
+#!/bin/sh
+# 94-cloud-init - metadata-driven configuration on providers that offer it.
+#
+# Convenient, but it pulls in Python: roughly 150M installed. Off by default,
+# and largely redundant with 70-growroot and 80-firstboot if all you wanted
+# was disk growth and SSH keys.
+set -eu
+
+apk add --quiet --no-progress cloud-init cloud-utils-growpart
+
+# Alpine's cloud-init package prints the services to enable in its post-install
+# message. This is the set that covers the common providers.
+for svc in cloud-init-local cloud-init cloud-config cloud-final; do
+	if [ -f "/etc/init.d/$svc" ]; then
+		rc-update add "$svc" default >/dev/null
+	fi
+done
+
+# cloud-init also manages SSH host keys and the instance id, so let it own
+# them instead of the firstboot service.
+if [ -f /etc/init.d/firstboot ]; then
+	rc-update del firstboot boot >/dev/null 2>&1 || true
+fi

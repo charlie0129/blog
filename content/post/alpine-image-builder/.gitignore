@@ -1,0 +1,9 @@
+# Your own configuration, which may contain a password hash or SSH keys.
+config.sh
+
+# Build artifacts.
+*.img
+*.img.*
+*.qcow2
+*.raw
+*.raw.*

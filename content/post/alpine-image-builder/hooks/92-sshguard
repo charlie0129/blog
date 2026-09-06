@@ -1,0 +1,43 @@
+#!/bin/sh
+# 92-sshguard - block SSH brute force without dragging in Python.
+set -eu
+
+apk add --quiet --no-progress sshguard nftables
+
+# Note that the nftables *service* is deliberately not enabled. Starting it
+# with its shipped ruleset can install a default-deny policy and lock you out
+# of a remote box. sshguard manages its own nftables sets and needs nothing
+# else running.
+
+mkdir -p /var/lib/sshguard
+
+cat >/etc/sshguard.conf <<'EOF'
+# Full path to backend executable. Required; there is no default.
+BACKEND='/usr/libexec/sshg-fw-nft-sets'
+
+# Space-separated list of log files to monitor.
+FILES='/var/log/messages'
+
+# Block attackers when their cumulative attack score exceeds THRESHOLD.
+# Most attacks have a score of 10.
+THRESHOLD=20
+
+# Block attackers for initially BLOCK_TIME seconds after exceeding THRESHOLD.
+# Subsequent blocks increase by a factor of 1.5.
+BLOCK_TIME=180
+
+# Remember potential attackers for up to DETECTION_TIME seconds before
+# resetting their score.
+DETECTION_TIME=3600
+
+# Permanently blacklist attackers when their cumulative score exceeds threshold.
+BLACKLIST_FILE=100:/var/lib/sshguard/blacklist.db
+
+# Size of IPv6 subnet to block. Defaults to a single address.
+IPV6_SUBNET=48
+
+# Size of IPv4 subnet to block. Defaults to a single address.
+IPV4_SUBNET=24
+EOF
+
+rc-update add sshguard default >/dev/null

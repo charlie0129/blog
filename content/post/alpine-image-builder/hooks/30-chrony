@@ -1,0 +1,19 @@
+#!/bin/sh
+# 30-chrony - NTP.
+set -eu
+
+apk add --quiet --no-progress chrony
+
+cat >/etc/chrony/chrony.conf <<EOF
+pool $NTP_POOL iburst
+driftfile /var/lib/chrony/chrony.drift
+rtcsync
+cmdport 0
+
+# VM clocks jump hard across live migration, suspend and host clock changes.
+# Plain slewing never catches up from that, so allow an unlimited number of
+# step corrections for offsets above one second.
+makestep 1.0 -1
+EOF
+
+rc-update add chronyd default >/dev/null

@@ -1,0 +1,16 @@
+#!/bin/sh
+# 90-tools - make Alpine feel like a general-purpose server.
+#
+# This is the opposite of minimal: roughly 120M installed. Off by default.
+set -eu
+
+apk add --quiet --no-progress \
+	bash coreutils findutils tar grep sed gawk diffutils procps util-linux \
+	shadow curl wget iproute2 bind-tools gcompat pciutils \
+	netcat-openbsd socat tcpdump iftop iptraf-ng ethtool traceroute \
+	git htop tmux vim less jq iperf3 sysstat rsync file
+
+if [ -n "$EXTRA_TOOLS" ]; then
+	# shellcheck disable=SC2086
+	apk add --quiet --no-progress $EXTRA_TOOLS
+fi

@@ -1,0 +1,49 @@
+#!/bin/sh
+# 91-ufw - a deny-incoming firewall, configured but applied on first boot.
+#
+# ufw only reloads the live ruleset when it is enabled, so every rule below
+# is recorded into /etc/ufw/*.rules without touching netfilter -- which is
+# what makes this work inside a build chroot at all. The switch is flipped
+# afterwards by editing ufw.conf directly instead of running `ufw enable`.
+set -eu
+
+apk add --quiet --no-progress ip6tables ufw
+
+ufw --force reset >/dev/null 2>&1 || true
+
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow in on lo
+
+ufw allow "$SSH_PORT/tcp" comment 'SSH'
+# Rate limit SSH brute force instead, if you prefer:
+#   ufw limit $SSH_PORT/tcp
+
+# RFC1918 and IPv6 ULA.
+ufw allow from 10.0.0.0/8
+ufw allow from 172.16.0.0/12
+ufw allow from 192.168.0.0/16
+ufw allow from fc00::/7
+
+# If this box is a gateway, a VPN server, or runs Podman containers with
+# published ports, add forward rules for the ranges you actually need.
+# Published container ports pass through DNAT and are matched by the forward
+# chain, so these can expose *every* published port -- list specific ports
+# instead if that is not what you want.
+#   ufw route allow to 10.0.0.0/8
+#   ufw route allow to 172.16.0.0/12
+#   ufw route allow to 192.168.0.0/16
+#   ufw route allow to fc00::/7
+
+if [ -n "$UFW_ALLOW" ]; then
+	printf '%s\n' "$UFW_ALLOW" | while read -r rule; do
+		[ -n "$rule" ] || continue
+		# shellcheck disable=SC2086
+		ufw allow $rule
+	done
+fi
+
+ufw logging low
+
+sed -i 's/^ENABLED=.*/ENABLED=yes/' /etc/ufw/ufw.conf
+rc-update add ufw default >/dev/null

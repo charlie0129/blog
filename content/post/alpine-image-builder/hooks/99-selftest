@@ -1,0 +1,51 @@
+#!/bin/sh
+# 99-selftest - check at boot that the image came out the way the config asked.
+#
+# Off by default. Add it to HOOKS while you are working on a config, then:
+#
+#   ./mkalpine.sh -f out.img
+#   ./testboot.sh -d out.img
+#
+# which boots the image under QEMU, prints the report and exits non-zero if
+# any check failed. Remove it again before you ship an image -- it prints to
+# the console on every boot, and it records your build-time settings in
+# /etc/selftest.conf.
+#
+# The point is that the checks run against what you *asked for*, not against
+# whatever the image happens to contain: the expectations below are baked in
+# from the build-time config, so a hook that silently did nothing shows up as
+# a failure rather than as a plausible-looking dump.
+#
+# The checks themselves are in hooks/files/selftest.initd. Keeping them in a
+# real file rather than a heredoc means they are ordinary shell -- no escaping,
+# and shellcheck can read them.
+set -eu
+
+# Expectations, resolved here because the hook is the only place that sees the
+# build-time configuration.
+cat >/etc/selftest.conf <<EOF
+EXPECT_HOOKS="$HOOKS"
+EXPECT_HOSTNAME="$IMAGE_HOSTNAME"
+EXPECT_BRANCH="$ALPINE_BRANCH_DIR"
+EXPECT_ROOT_FS="$ROOT_FS"
+EXPECT_ROOT_OPTS="$FSTAB_ROOT_OPTS"
+EXPECT_BOOT_FS="$BOOT_FS"
+EXPECT_SUBVOL="$BTRFS_SUBVOL"
+EXPECT_SERIAL="$SERIAL_CONSOLE"
+EXPECT_TIMEZONE="$TIMEZONE"
+EXPECT_SSH_PORT="$SSH_PORT"
+EXPECT_SSH_ROOT="$SSH_PERMIT_ROOT_LOGIN"
+EXPECT_SSH_KEYS="$SSH_AUTHORIZED_KEYS"
+EXPECT_NETWORK="$NETWORK"
+EXPECT_IFACE="$NETWORK_INTERFACE"
+EXPECT_NTP="$NTP_POOL"
+EXPECT_ZRAM_TMP="$ZRAM_TMP"
+EXPECT_ZRAM_RATIO="$ZRAM_SWAP_RATIO"
+EXPECT_BBR="$ENABLE_BBR"
+EXPECT_DOTFILES_DIR="$DOTFILES_DIR"
+EXPECT_DOTFILES_SHELL="$DOTFILES_SHELL"
+EXPECT_DOTFILES_Z4H="$DOTFILES_Z4H"
+EOF
+
+install -m 0755 /tmp/mkalpine/files/selftest.initd /etc/init.d/selftest
+rc-update add selftest default >/dev/null

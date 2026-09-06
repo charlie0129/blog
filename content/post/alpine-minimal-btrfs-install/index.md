@@ -25,6 +25,8 @@ The trick is not complicated:
 
 This post is the install recipe I use to build a minimal BIOS/MBR Alpine image, then optionally convert it to QCOW2 for reuse.
 
+> If you would rather not do this by hand, I later automated the whole thing: [Building Alpine Linux Disk Images Without a VM](../alpine-image-builder/) is a script that builds the same class of image as a file, with no VM and no interactive steps, and boots under both BIOS and UEFI. This post is still the explanation of *why* the pieces are the way they are.
+
 ## Assumptions
 
 This guide targets a very specific VM shape:

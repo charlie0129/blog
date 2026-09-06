@@ -1,0 +1,42 @@
+#!/bin/sh
+# 10-network - /etc/network/interfaces and the DHCP client.
+set -eu
+
+apk add --quiet --no-progress ifupdown-ng
+
+IFACE=${NETWORK_INTERFACE:-eth0}
+
+{
+	echo 'auto lo'
+	echo 'iface lo inet loopback'
+	echo
+	echo "auto $IFACE"
+
+	case "$NETWORK" in
+	dhcp)
+		echo "iface $IFACE inet dhcp"
+		;;
+	static)
+		[ -n "$IP_ADDRESS" ] || { echo "NETWORK=static needs IP_ADDRESS" >&2; exit 1; }
+		echo "iface $IFACE inet static"
+		echo "	address $IP_ADDRESS"
+		[ -n "$GATEWAY" ] && echo "	gateway $GATEWAY"
+		;;
+	*)
+		echo "unknown NETWORK: $NETWORK" >&2
+		exit 1
+		;;
+	esac
+
+	# SLAAC needs no stanza at all; the kernel does it. Some providers only
+	# hand out addresses over real DHCPv6, which does.
+	case "$IPV6" in
+	dhcp) echo "iface $IFACE inet6 dhcp" ;;
+	none) echo "	pre-up echo 1 > /proc/sys/net/ipv6/conf/$IFACE/disable_ipv6" ;;
+	esac
+} >/etc/network/interfaces
+
+if [ "$IPV6" = dhcp ]; then
+	# busybox udhcpc has no DHCPv6 client, so ifupdown-ng needs a real one.
+	apk add --quiet --no-progress dhcpcd
+fi

@@ -1,0 +1,116 @@
+#!/bin/sh
+# 95-dotfiles - clone a dotfiles repo and make its shell root's login shell.
+#
+# Off by default, and the most personal hook here: the default DOTFILES_REPO is
+# mine, whose bootstrap.sh symlinks ~/.zshrc and friends out of the checkout and
+# whose zsh setup is zsh4humans. Point DOTFILES_REPO at your own -- clone,
+# bootstrap, switch the login shell is the same shape for most of them -- or
+# drop the hook.
+#
+# It only configures root, because that is the account mkalpine.sh builds a
+# $HOME for.
+#
+# About 67M of files: 26M of packages (git is most of it), 5M of checkout and
+# 28M of zsh4humans plugins and prebuilt binaries. Measured on the default
+# compressed btrfs root, that is 21M of actual disk -- the image went from 55M
+# to 76M allocated.
+#
+# It is also the only hook that needs the network for something other than the
+# Alpine mirror: GitHub, both for the repo and for zsh4humans.
+set -eu
+
+# bash: bootstrap.sh and its bin/fix-permission are bash scripts.
+# lsd:  the ls aliases in the repo use it when it is installed.
+# curl: zsh4humans reaches for curl before it falls back to busybox wget.
+apk add --quiet --no-progress git zsh bash lsd curl
+
+if [ -d "$DOTFILES_DIR/.git" ]; then
+	echo "95-dotfiles: $DOTFILES_DIR is already a checkout, not cloning"
+else
+	# --depth 1: nothing in the image needs the history, and it halves the
+	# checkout (5M of files, 1M of .git). "git pull" still works.
+	#
+	# No --recurse-submodules on purpose: the only submodule is NvChad, a
+	# neovim config, and neovim is not installed here. Add
+	# --recurse-submodules --shallow-submodules if you install it.
+	git clone --depth 1 "$DOTFILES_REPO" "$DOTFILES_DIR"
+fi
+
+# bootstrap.sh links into $HOME, which is /root for a hook. -f overwrites what
+# is already there; without it every link is skipped as "file already exists",
+# and on a fresh image there is nothing to lose anyway.
+(cd "$DOTFILES_DIR" && ./bootstrap.sh -f)
+
+if [ -n "$DOTFILES_SHELL" ]; then
+	case "$DOTFILES_SHELL" in
+	/*) login_shell=$DOTFILES_SHELL ;;
+	*) login_shell=$(command -v "$DOTFILES_SHELL" 2>/dev/null || true) ;;
+	esac
+	[ -n "$login_shell" ] && [ -x "$login_shell" ] || {
+		echo "95-dotfiles: no such shell: $DOTFILES_SHELL" >&2
+		exit 1
+	}
+
+	# chsh lives in shadow, which a minimal Alpine does not have, so rewrite
+	# field 7 of root's line directly. Writing the new file elsewhere and
+	# cat'ing it back keeps /etc/passwd's inode, mode and owner.
+	#
+	# Alpine's baselayout already lists /bin/ash, /bin/bash and /bin/zsh in
+	# /etc/shells, so nothing else needs updating for the usual choices.
+	awk -F: -v OFS=: -v shell="$login_shell" \
+		'$1 == "root" { $7 = shell } { print }' /etc/passwd >/tmp/passwd.new
+	cat /tmp/passwd.new >/etc/passwd
+	rm -f /tmp/passwd.new
+fi
+
+if [ "$DOTFILES_Z4H" = yes ]; then
+	# zsh4humans downloads itself, its plugins and two prebuilt binaries
+	# (fzf, gitstatusd) the first time an interactive zsh starts. Doing it
+	# here means the shell is ready on a machine with no internet, and that a
+	# failed download fails the build rather than the first login.
+	#
+	# The command below looks like it should be all there is to it, and is not.
+	# z4h ends its setup by exec'ing an interactive zsh over the shell that
+	# started it, unconditionally, to warm the rest of its caches
+	# (main.zsh: "if [[ ! -o interactive ]]; then exec -- $_z4h_exe -i").  Two
+	# consequences, and the second one cost me a while:
+	#
+	#   - That exec means the [[ -r ]] test below never runs when things go
+	#     well, and the shell that replaced it exits 0 at EOF whatever
+	#     happened. So the same test is repeated after the command, out here,
+	#     where nothing can exec over it.
+	#   - The replacement shell wants a terminal, and it will go looking: an
+	#     interactive zsh opens /dev/tty for its line editor when stdin is not
+	#     one. Redirecting stdin therefore does not stop it from drawing a
+	#     prompt on the build's console and waiting there for a command.  What
+	#     stops it is having no controlling terminal to open, which mkalpine.sh
+	#     arranges for every hook -- see in_chroot_hook. The redirection below
+	#     is only doing anything if you lift this hook into a builder that does
+	#     not.
+	#
+	# The output goes to a file and is shown only on failure: it is a page of
+	# progress meters full of escape sequences, plus a gitstatus complaint and
+	# "can't change option: monitor" that are expected here, because job control
+	# needs a terminal and this deliberately has none.
+	echo "95-dotfiles: bootstrapping zsh4humans"
+	z4h_dir=${Z4H:-$HOME/.cache/zsh4humans/v5}
+	if Z4H_BOOTSTRAPPING=1 zsh -c \
+		'[[ -r $Z4H/zsh4humans/main.zsh ]] || { print -ru2 -- "z4h bootstrap failed"; exit 1 }' \
+		</dev/null >/tmp/z4h.log 2>&1 &&
+		[ -r "$z4h_dir/zsh4humans/main.zsh" ]
+	then
+		rm -f /tmp/z4h.log
+	else
+		echo "95-dotfiles: zsh4humans bootstrap failed:" >&2
+		cat /tmp/z4h.log >&2
+		exit 1
+	fi
+
+	# Whether every plugin really landed is a question for the finished image
+	# rather than for this file: 99-selftest starts an interactive zsh at boot
+	# and requires it to source the repo's .zshrc.
+
+	# That warm-up shell leaves a directory-frecency file behind recording
+	# where the build ran. It is not this machine's history, so drop it.
+	rm -f "$HOME/.z" "$HOME/.z.lock"
+fi

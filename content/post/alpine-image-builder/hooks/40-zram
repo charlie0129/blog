@@ -1,0 +1,41 @@
+#!/bin/sh
+# 40-zram - compressed swap (and optionally /tmp) in RAM instead of on disk.
+#
+# Disk swap on a 1 GB cloud disk is a waste of the disk and slow besides.
+# zram gives you swap-like behaviour without touching the disk at all.
+set -eu
+
+apk add --quiet --no-progress zram-init
+
+# Sizes are evaluated at boot, on the machine's real RAM, not at build time.
+# Because zram compresses, a swap device the size of RAM does not immediately
+# consume that much physical memory.
+cat >/etc/conf.d/zram-init <<EOF
+load_on_start=yes
+unload_on_stop=yes
+num_devices=$([ "$ZRAM_TMP" = yes ] && echo 2 || echo 1)
+
+# /dev/zram0: swap, ${ZRAM_SWAP_RATIO}% of RAM
+type0=swap
+size0=\$(LC_ALL=C free -m | awk '/^Mem:/{print int(\$2 * $ZRAM_SWAP_RATIO / 100)}')
+maxs0=1
+algo0=$ZRAM_ALGO
+labl0=zram_swap
+EOF
+
+if [ "$ZRAM_TMP" = yes ]; then
+	cat >>/etc/conf.d/zram-init <<EOF
+
+# /dev/zram1: /tmp, a quarter of RAM
+type1=/tmp
+size1=\$(LC_ALL=C free -m | awk '/^Mem:/{print int(\$2 / 4)}')
+maxs1=1
+algo1=$ZRAM_ALGO
+labl1=zram_tmp
+opts1=nosuid,nodev,discard
+EOF
+	# /tmp cannot be both a tmpfs from fstab and a zram device.
+	sed -i '/[[:space:]]\/tmp[[:space:]]/d' /etc/fstab
+fi
+
+rc-update add zram-init boot >/dev/null
