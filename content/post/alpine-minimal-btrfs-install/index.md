@@ -321,6 +321,53 @@ rc-service networking restart
 
 If the provider uses DHCP, keep the interface as DHCP instead and let Alpine request the address normally.
 
+## Restore Without A Console Or Rescue Mode
+
+The cheapest tiers take the rest of it away too: no custom-image import, no VNC, no serial console, no rescue mode. The stock OS and SSH are all you get. The initramfs trick above is unreachable there, because its one console step — interrupting GRUB — has no SSH equivalent: an initramfs shell has no network stack and no sshd.
+
+What still works is having a script arrange that environment for you. [bin456789/reinstall](https://github.com/bin456789/reinstall) rewrites the stock bootloader to boot a minimal Alpine that runs entirely in RAM, and from there downloads your image and `dd`s it over the whole disk before rebooting into it. No console is involved at any point. You watch the progress over SSH, and if the download or the write fails, the RAM system keeps its sshd up, so a failure is a retry by hand rather than a reinstall ticket.
+
+```bash
+# From the provider's stock OS, as root. This is destructive: it will
+# wipe the whole disk, other partitions included.
+#
+# Mainland-China boxes often cannot reach raw.githubusercontent.com; the
+# project mirrors the script at cnb.cool for exactly that case.
+curl -O https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh
+# curl -O https://cnb.cool/bin456789/reinstall/-/git/raw/main/reinstall.sh
+
+# Prompts for a username/password, used to log in over SSH and watch.
+# .gz / .xz / .zst compressed raw images are accepted directly.
+bash reinstall.sh dd --img="https://example.com/alpine.img.gz"
+
+# Still reversible until here: `bash reinstall.sh reset` restores the
+# original bootloader config.
+reboot
+```
+
+Before it does anything, the script asks for a username and a password, and it is worth being clear about what they are not: the new system's login. They exist only inside the RAM installer environment — they are what you would type to SSH back in while the `dd` runs, to watch progress or clean up after a failure. A Linux image gets nothing injected; the script's own end-of-run summary says as much, printing `Password: [Depends on image]` under "After Install". So press Enter twice — `root`, then a random password the summary displays for copying — and let whatever the image baked in be the machine's real credentials. `--ssh-key` replaces that password with one of your public keys for the installer environment, if typing nothing at all is the goal.
+
+When you do log in mid-install, expect a host-key mismatch: the RAM environment presents its own host keys, and so does the finished image, so the client will complain about the stock OS's key on the way in and about both of them after the final reboot. That is the process working, not something broken — clear the old entry with `ssh-keygen -R` or accept the new key each time. On a NAT'd box the installer's sshd still listens on port 22 internally, so the provider's forwarded port keeps working throughout.
+
+Four things to get right, all of them consequences of there being no console:
+
+**The image URL must be reachable from the VPS.** The download runs inside the RAM environment, over the same network the stock OS uses. For a box in mainland China that usually rules out GitHub-hosted files; one of my own servers or local object storage works better.
+
+**The image has to work as-is.** `dd` mode does not modify a Linux image, so the network settings, the SSH keys, and the sshd port must be baked into the image *before* flashing — the "apply provider-specific network settings" step above has to happen inside the image, not on the machine afterwards. On a NAT'd box, where the provider forwards one public port to (say) internal port 22, changing the sshd port in the image orphans that forward and the machine. If the image comes from [the builder](../alpine-image-builder/), the `10-network` and `20-ssh` hooks are where this goes.
+
+**Check whether the stock OS keeps its root on LVM before rebooting.** The script stages `reinstall-vmlinuz` and `reinstall-initrd` in the stock OS's root directory and lets GRUB find them with `search --file`. GRUB's LVM support is incomplete — thin-provisioned volumes are unsupported outright, and some perfectly ordinary LVM roots also defeat it for reasons that are not understood ([issue #355](https://github.com/bin456789/reinstall/issues/355)). When that happens, GRUB stops at `file '/reinstall-vmlinuz' not found` and the RAM environment is never reached. On a machine with a console that is a visible error; on this kind of machine the box reboots and simply never speaks again. One `lsblk` settles it beforehand — if `/` sits on an `lvm` device, copy both files to `/boot`, which Debian-style LVM installs keep on a plain partition that GRUB reads reliably:
+
+```bash
+lsblk -o NAME,TYPE,FSTYPE,MOUNTPOINTS   # is / on an lvm device?
+cp /reinstall-vmlinuz /reinstall-initrd /boot/
+```
+
+The copies are harmless if they were not needed: `search --file` scans every filesystem GRUB can read, so it finds the `/boot` copies whenever the LVM ones are invisible. The workaround is the tool author's own, from the issue thread. If `/boot` is only a directory inside the LVM root, there is no plain partition to stage onto, and I would not run this flow on such a box without a console.
+
+**Audit before the final reboot.** `--hold 2` stops after the `dd` finishes but before the reboot. SSH back in, mount the freshly written root and boot partitions read-write, and check `/etc/network/interfaces`, the authorized keys, and the bootloader config while a mistake is still fixable with a text editor. It is the last moment anything is.
+
+The RAM environment is small — the project lists 256 MB of RAM as the minimum — so this works on boxes too tiny for anything else. To drive the final `dd` by hand instead, `bash reinstall.sh alpine --hold 1` boots the same RAM Alpine and stops there, nothing written; it is also a cheap dry run for whether that environment's networking works on the provider's NAT at all. And if the machine still does not come back after the last reboot, the floor is the provider's own reinstall button, back to the stock OS — annoying, not fatal.
+
 ## Things I Bake Into The Image
 
 The base install above is intentionally small. The sections below are optional knobs I usually apply before making the reusable image.

@@ -568,6 +568,8 @@ sudo OUTPUT_FORMATS="raw.zst" ./mkalpine.sh -f alpine.img
 
 If your provider has no image import at all — which is the common case on the cheap tiers — the restore-over-`dd` trick from the [old post](../alpine-minimal-btrfs-install/#restore-from-the-providers-original-os) still applies: boot their stock OS, `dd` the image onto the disk from a rescue environment or over SSH, and reboot. `70-growroot` then handles the fact that their disk is larger than the image.
 
+That flow needs a console or a rescue system at one point or another. When the provider offers neither — no VNC, no serial, no rescue mode, just the stock OS and SSH, which is what the smallest NAT'd tiers look like — use the [no-console variant](../alpine-minimal-btrfs-install/#restore-without-a-console-or-rescue-mode) in the old post instead: [`reinstall`](https://github.com/bin456789/reinstall) `dd` mode arranges a RAM-resident Alpine by rewriting the stock bootloader, then writes the image over the whole disk and reboots, all over SSH. It accepts the `raw.gz` / `raw.zst` / `raw.xz` artifacts from `OUTPUT_FORMATS` as-is, and it does not modify a Linux image — which, on a headless box, promotes `10-network` and `20-ssh` from conveniences to the difference between a machine that comes back and a reinstall ticket.
+
 ## What I Kept From The Old Post
 
 Everything about *why*. The old post explains the 64 MiB `/boot`, the compressed Btrfs root, the absence of disk swap, and the individual tweaks in far more detail than a config file comment can, and it is still the reference for doing this by hand on a machine you have already booted. This post is the automation of it.
