@@ -275,7 +275,7 @@ systemctl restart systemd-journald
 
 ## NVIDIA P2P Driver Installation
 
-Instead of regular NVIDIA drivers, we will be installing P2P-enabled drivers to force enable PCIe P2P capabilities on consumer cards (like GeForce RTX 4090). This will bring performance boost (~10%) across multiple scenarios. For details, refer to my blog post: https://blog.chlc.cc/p/rtx4090-gpudirect-p2p-unlocked
+Instead of regular NVIDIA drivers, we will be installing P2P-enabled drivers to force enable PCIe P2P capabilities on consumer cards (like GeForce RTX 4090). This will bring performance boost (~10%) across multiple scenarios. For details, refer to my blog post: https://charlie0129.github.io/blog/p/rtx4090-p2p-unlocked/
 
 ### Disable IOMMU
 
