@@ -25,7 +25,7 @@ The trick is not complicated:
 
 This post is the install recipe I use to build a minimal BIOS/MBR Alpine image, then optionally convert it to QCOW2 for reuse.
 
-> If you would rather not do this by hand, I later automated the whole thing: [Building Alpine Linux Disk Images Without a VM](../alpine-image-builder/) is a script that builds the same class of image as a file, with no VM and no interactive steps, and boots under both BIOS and UEFI. This post is still the explanation of *why* the pieces are the way they are.
+> If you would rather not do this by hand, I later automated the whole thing: [Building Alpine Linux Disk Images Without a VM]({{< ref "/post/alpine-image-builder" >}}) is a script that builds the same class of image as a file, with no VM and no interactive steps, and boots under both BIOS and UEFI. This post is still the explanation of *why* the pieces are the way they are.
 
 ## Assumptions
 
@@ -353,7 +353,7 @@ Four things to get right, all of them consequences of there being no console:
 
 **The image URL must be reachable from the VPS.** The download runs inside the RAM environment, over the same network the stock OS uses. For a box in mainland China that usually rules out GitHub-hosted files; one of my own servers or local object storage works better.
 
-**The image has to work as-is.** `dd` mode does not modify a Linux image, so the network settings, the SSH keys, and the sshd port must be baked into the image *before* flashing — the "apply provider-specific network settings" step above has to happen inside the image, not on the machine afterwards. On a NAT'd box, where the provider forwards one public port to (say) internal port 22, changing the sshd port in the image orphans that forward and the machine. If the image comes from [the builder](../alpine-image-builder/), the `10-network` and `20-ssh` hooks are where this goes.
+**The image has to work as-is.** `dd` mode does not modify a Linux image, so the network settings, the SSH keys, and the sshd port must be baked into the image *before* flashing — the "apply provider-specific network settings" step above has to happen inside the image, not on the machine afterwards. On a NAT'd box, where the provider forwards one public port to (say) internal port 22, changing the sshd port in the image orphans that forward and the machine. If the image comes from [the builder]({{< ref "/post/alpine-image-builder" >}}), the `10-network` and `20-ssh` hooks are where this goes.
 
 **Check whether the stock OS keeps its root on LVM before rebooting.** The script stages `reinstall-vmlinuz` and `reinstall-initrd` in the stock OS's root directory and lets GRUB find them with `search --file`. GRUB's LVM support is incomplete — thin-provisioned volumes are unsupported outright, and some perfectly ordinary LVM roots also defeat it for reasons that are not understood ([issue #355](https://github.com/bin456789/reinstall/issues/355)). When that happens, GRUB stops at `file '/reinstall-vmlinuz' not found` and the RAM environment is never reached. On a machine with a console that is a visible error; on this kind of machine the box reboots and simply never speaks again. One `lsblk` settles it beforehand — if `/` sits on an `lvm` device, copy both files to `/boot`, which Debian-style LVM installs keep on a plain partition that GRUB reads reliably:
 

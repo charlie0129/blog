@@ -160,7 +160,7 @@ In case it is disabled, run:
 root@t3640:/# ethtool -A enp1s0f0np0 rx on tx on
 ```
 
-**Test RDMA speed. Refer to my previous blog [InfiniBand Performance Test](../ib-perf-test) for details.**
+**Test RDMA speed. Refer to my previous blog [InfiniBand Performance Test]({{< ref "/post/ib-perf-test" >}}) for details.**
 
 Run the following command on client and server, respectively:
 
