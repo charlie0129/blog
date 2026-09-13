@@ -328,6 +328,44 @@ the write rate did not budge until I bounced it.
 Result: 101 files per minute down to 2. The cost is that graph and Insight history no
 longer survive a reboot, which was a deliberate trade.
 
+### 15. The last write hog is Unbound's DuckDB, and `du` lies about it
+
+Even after the four tmpfs mounts above, the disk still took a steady 40 to 80 KB/s of pure
+writes, with zero reads and about one write per second. `top -m io` attributed it to nobody,
+because the writes come from the UFS syncer flushing buffered data rather than from a
+process in the sampling window.
+
+Scanning the *whole* root filesystem rather than just `/var` found only three files
+changing in two minutes:
+
+```
+/var/db/dnsmasq.leases
+/var/db/entropy/saved-entropy.5
+/var/unbound/data/unbound.duckdb
+```
+
+`unbound.duckdb` is the store behind Unbound's DNS reporting, fed by
+`/usr/local/opnsense/scripts/unbound/logger.py`. It is only about 1.8 MB, but it is
+rewritten in place every 15 to 40 seconds, and a 1.8 MB in-place rewrite once a minute is
+most of that write rate. Moving `/var/unbound/data` to tmpfs is safe: it holds only the
+DuckDB, a named pipe and an empty stats file. The DNSSEC trust anchor `root.key` lives in
+`/var/unbound/`, one level up, and must stay on disk. Owner is `unbound:unbound`.
+
+The alternative is unchecking Statistics under Services > Unbound DNS, which stops the
+writes outright at the cost of the DNS reports.
+
+**And the `du` trap.** `du -sm /var/unbound` reported 574 MB, which sent me looking for a
+runaway file that did not exist. Unbound runs chrooted, and OPNsense nullfs-mounts the
+host's `/lib` and Python runtime inside it, plus a devfs. `du` happily walks into those and
+counts the host system twice. Use `du -sxm` to stay on one filesystem, or check `mount`
+first.
+
+What is left after this is one misbehaving client. A device on the Management VLAN renews
+its DHCP lease in a tight loop despite a 30-day lease time, and every ACK rewrites
+`dnsmasq.leases`. That is a client to fix rather than a router setting. Measured writes went
+from a steady 40 to 80 KB/s down to somewhere between 2 and 24 KB/s depending on how hard
+that client is churning.
+
 ## Diagnostic techniques that actually worked
 
 Most of the wrong turns above came from trusting the GUI. What I would reach for first
@@ -341,6 +379,11 @@ next time:
   viewer. Fields worth knowing: rule number, label, interface, action, direction, IP
   version, protocol, source, destination, source port, destination port.
 - `configctl interface gateways status` for the truth about dpinger.
+- To find what is writing to disk, scan the whole root filesystem with
+  `find / -xdev -type f -newer <marker>` rather than guessing at directories, and split
+  reads from writes with `iostat -x`, whose `kw/s` column is the one that matters. Note that
+  `iostat` without `-w` prints a since-boot average, so a change you just made appears to
+  have done nothing. `top -m io` will not find a buffered writer.
 - The API endpoint `/api/diagnostics/firewall/pf_statistics/rules` returns the whole loaded
   ruleset with per-rule counters as JSON, which is the single most useful thing on the box.
 - For scripted changes, the model layer rather than editing `config.xml`. Instantiate
