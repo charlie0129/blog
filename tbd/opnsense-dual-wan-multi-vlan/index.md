@@ -253,14 +253,37 @@ gateway going down drops its states rather than leaving them to blackhole.
 ### 10. rtsold does not re-solicit after a PPPoE re-dial
 
 After the link came back, `pppoe0` sat with only a link-local address for over two minutes.
-No global address, no IPv6 default route, no errors anywhere. One command fixed it:
+No global address, no IPv6 default route, no errors anywhere. It recurs on **every reboot**,
+so it needs a watchdog rather than a manual command. One `rtsol` fixes it:
 
 ```bash
 rtsol pppoe0
 ```
 
-Now that the reconnect loop is gone this should be rare, but it is worth a watchdog if you
-see it again.
+rtsold sends at most `MAX_RTR_SOLICITATIONS` solicitations and then waits for an unsolicited
+RA. On a PPPoE link the session frequently comes up after that window has closed, and this
+ISP does not send unsolicited RAs often enough to recover on its own.
+
+The watchdog is a three-part thing, all upgrade-safe:
+
+1. `/usr/local/sbin/ipv6-ra-watchdog`, which solicits only on an interface that is up and
+   holds no non-link-local address, so it is a cheap no-op the rest of the time.
+2. A configd action in `/usr/local/opnsense/service/conf/actions.d/actions_ipv6watchdog.conf`.
+3. A cron job every five minutes, added through the Cron model so it shows up in the GUI.
+
+Two traps while wiring that up. The action file needs a `description:` line, not just
+`message:`, because the cron `command` field is a `ConfigdActionsField` that filters on
+description, so without it the action never appears in the picker. And configd must be
+restarted with `service configd restart` before it sees a new action file.
+
+Also note where cron jobs actually land. The template writes to `/var/cron/tabs/nobody`, not
+`/var/cron/tabs/root`, and the entries invoke `configctl -d` so that configd runs the script
+as root. I spent a while grepping the wrong crontab.
+
+One last warning from testing this: deleting the address by hand with `ifconfig ... -alias`
+is *not* a faithful simulation of the failure, because the kernel keeps the prefix in its
+list and will not re-add an address from a duplicate RA immediately. Allow a good 15 seconds
+after `rtsol` before concluding it did not work.
 
 ### 11. SLAAC or DHCPv6 on the PPPoE WAN? SLAAC.
 
@@ -366,6 +389,73 @@ its DHCP lease in a tight loop despite a 30-day lease time, and every ACK rewrit
 from a steady 40 to 80 KB/s down to somewhere between 2 and 24 KB/s depending on how hard
 that client is churning.
 
+### 16. The PPPoE MSS clamp covers IPv4 only, so IPv6 hits a PMTU black hole
+
+Once IPv6 genuinely worked end to end, a subtler failure surfaced. From a LAN host,
+`https://www.baidu.com` returned 200 in 60 ms while `http://www.baidu.com` timed out, and
+`https://ip.sb` was fine. The pattern is size, not host: the HTTPS reply was a 227-byte
+redirect, the HTTP reply was the full page. pf showed those port-80 states as
+`ESTABLISHED:ESTABLISHED`, so the handshake completed and the transfer then stalled.
+
+The cause is visible in the netgraph wiring:
+
+```
+ng0 (PPPoE iface node)
+  inet   ->  mpd-opt1-mss (tcpmss)  ->  ppp
+  inet6  ->  ppp                          (bypasses the clamp entirely)
+```
+
+mpd's `set iface enable tcpmssfix` builds an `ng_tcpmss` node but attaches it to the `inet`
+hook only. Every IPv4 connection gets its MSS rewritten to fit the 1492-byte link. IPv6
+never touches the clamp.
+
+With PPPoE costing 8 bytes of the 1500-byte frame:
+
+| | Header overhead | MSS that fits 1492 | MSS the host advertises |
+|---|---|---|---|
+| IPv4 | 20 + 20 | 1452 | clamped to 1452 |
+| IPv6 | 40 + 20 | 1432 | 1440, because RAs advertise MTU 1500 |
+
+Eight bytes too many, which is why it presents as flakiness rather than an outage. Only
+replies that use full-size segments die.
+
+The second half of the answer is that **IPv6 routers are forbidden from fragmenting**. In
+IPv4 an intermediate router may fragment when DF is clear, so there is a fallback. In IPv6
+only the sender may fragment, so an oversized packet is dropped and an ICMPv6 Packet Too Big
+must reach the sender. Here the drop happens at the ISP's PPPoE concentrator as it
+encapsulates the reply, so the PTB would have to travel from the ISP back to the origin
+server. You control neither end, which is exactly why clamping locally is the standard fix.
+
+Worth stating plainly because it is the first thing people assume: **NAT is not involved**,
+and neither is the choice of SLAAC over DHCPv6. The 1492 comes from PPPoE encapsulation and
+is identical either way.
+
+Two fixes, and both are worth having:
+
+- Set `AdvLinkMTU` to 1492 on each LAN interface under Services > Router Advertisements.
+  Hosts then advertise MSS 1432. This only reloads radvd, so it cannot disturb IPv4.
+- Set an MSS value on the interfaces so pf emits `scrub ... max-mss`, which rewrites the SYN
+  whether or not a host honours the RA MTU, and covers both families. This one triggers a
+  filter reload.
+
+The first fix is applied. Hosts pick up the new value within seconds, visible as `mtu 1492`
+on the IPv6 default route:
+
+```
+default via fe80::... proto ra metric 1024 expires 1797sec mtu 1492 hoplimit 64
+```
+
+The case that used to hang now completes, and so does a genuinely large transfer:
+
+| Test over IPv6 | Before | After |
+|---|---|---|
+| `http://www.baidu.com`, full page | timeout at 10s | 200, 715 KB in 0.85s |
+| 38 MB file from a mirror | not attempted | 200, 38 MB in 0.51s |
+| IPv4 to the same host | 200 | 200, unchanged |
+
+The pf `scrub ... max-mss` half is still worth adding as a belt-and-braces measure for any
+host that ignores the RA MTU, such as a device with a static IPv6 configuration.
+
 ## Diagnostic techniques that actually worked
 
 Most of the wrong turns above came from trusting the GUI. What I would reach for first
@@ -396,11 +486,54 @@ next time:
 
 ## Still open
 
-- Something on the Management VLAN uses `192.168.92.251`, and another host there holds a
-  China Mobile IPv6 address. Neither should exist on a ULA-only segment, so something is
-  bridged to another network. Not chased down yet.
 - The International VLAN currently has unrestricted egress. The name implies it should
   route somewhere specific, which is the next piece of work.
-- No watchdog for the `rtsol` problem in gotcha 10.
+- The pf `scrub ... max-mss` half of gotcha 16 is not yet applied. The RA MTU half is.
 - `CT_NET4`, `CT_NET6`, `CU_NET4` and `CU_NET6` aliases are defined but referenced by
   nothing.
+- A VM ARPs every ten seconds for a `172.24.0.0/13` address belonging to a games console
+  on the same segment. Harmless, but I have not identified which piece of software does it.
+
+## Tracking down a stray address, and a lesson about volatile logs
+
+Two oddities went unexplained for a while: a host apparently using `192.168.92.251`, and
+another holding a China Mobile IPv6 address, both on a segment that should only ever carry
+ULA. My first write-up put both on the Management VLAN. That was wrong, and the way I found
+out is the interesting part.
+
+**Do not rely on the firewall log for anything you might want tomorrow.** `/var/log` is
+tmpfs on this box, deliberately, so the reboot erased every trace of both anomalies. The
+tables were no help either, because `arp` and `ndp` only show what is live right now.
+
+What did survive was **Hostwatch**, which keeps an IP-to-MAC history per interface with OUI
+vendor lookups, and it answered the question in one query:
+
+```sql
+select interface_name, ip_address, ether_address, organization_name
+from v_hosts order by interface_name, ip_address;
+```
+
+The China Mobile address was `2409:8900:2657:29e:98f1:4a0:6f2f:a19c`. Its interface
+identifier, `98f1:4a0:6f2f:a19c`, is a privacy IID with no MAC embedded, so it looks
+anonymous. But the same host also had a link-local built from the same IID,
+`fe80::98f1:4a0:6f2f:a19c`, and Hostwatch had recorded *that* against a MAC. From there the
+DHCP lease file gave the hostname outright. The device was a VM on the default VLAN, not on
+Management at all.
+
+Three things worth stealing from this:
+
+- Match a privacy-addressed IPv6 host by its interface identifier. SLAAC reuses the same IID
+  for the link-local and every global address, so one sighting anywhere ties them together.
+- `/var/db/dnsmasq.leases` turns a MAC into a hostname, which usually ends the search.
+- Check `pfctl -sr` style live state *and* a historical source. Neither alone is enough.
+
+And a caution about my own method: two of my captures produced nothing useful because the
+filters were wrong, once from a subnet-per-interface mismatch and once from filtering
+`src net 2409::/16` on a LAN interface, which simply catches ordinary NAT66 reply traffic
+from China Mobile-hosted servers. An empty capture is not evidence of absence until you have
+proved the filter matches something you expect it to.
+
+The `192.168.92.251` sighting remains unexplained. It appears nowhere in the configuration,
+Hostwatch has not seen it since the reboot, and the China Mobile WAN segment currently
+carries exactly two MAC addresses, the router's and the ISP gateway's, so nothing is bridged
+onto it today.
