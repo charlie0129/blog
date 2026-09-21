@@ -149,12 +149,43 @@ session, so IPv6 loses its whole source prefix each time. I watched the WAN addr
 `...33e7...`, `...3469...`, `...34b5...` in one evening. If your WAN IPv6 address changes
 every few minutes, read the ppp log before you touch anything IPv6.
 
-### 3. Turn off Shared forwarding for multi-WAN IPv6
+### 3. Shared forwarding: received wisdom said off, measurement said on
 
-**Firewall > Settings > Advanced > Shared forwarding.** The option exists because policy
-routing makes packets skip traffic shaper and captive portal processing, and enabling it
-shares the routing decision with those subsystems. It also breaks multi-WAN IPv6. If you
-run neither the shaper nor a captive portal, you lose nothing by leaving it off.
+**Firewall > Settings > Advanced > Shared forwarding.** The tooltip explains what it is for:
+
+> Using policy routing in the packet filter rules causes packets to skip processing for the
+> traffic shaper and captive portal tasks. Using this option enables the sharing of such
+> forwarding decisions between all components to accommodate complex setups.
+
+Off is the default, and the standing advice in the OPNsense forums is to keep it off on
+multi-WAN with IPv6. I followed that for most of this build, and it cost me the traffic
+shaper, since every one of my LAN rules uses policy routing.
+
+Then I actually tested it, and on 25.7 with this configuration **it does not break anything**.
+Details in gotcha 18. It is now on, which means the shaper is usable.
+
+The mechanism, from the sysctl's own description:
+
+```
+net.pf.share_forward:  If set pf(4) will defer IPv4 forwarding to the network stack.
+net.pf.share_forward6: If set pf(4) will defer IPv6 forwarding to the network stack.
+```
+
+Off, a rule carrying `route-to` makes pf do the forwarding itself: it picks the egress
+interface and hands the packet straight to that interface's output routine, leaving the normal
+forwarding path entirely. On, pf still decides but hands the packet back to `ip_forward()` or
+`ip6_forward()` to carry out. The shaper is dummynet, hooked into the pfil chain that the
+normal path walks, so a short-circuiting pf means shaping rules match nothing.
+
+Note that the single GUI checkbox drives *both* sysctls:
+
+```php
+'net.pf.share_forward'  => !empty($config['system']['pf_share_forward']) ? '1' : '0',
+'net.pf.share_forward6' => !empty($config['system']['pf_share_forward']) ? '1' : '0',
+```
+
+They are independent sysctls though, so a Tunable can enable one without the other. That is
+the escape hatch if the IPv6 half ever does misbehave for you: shape IPv4, leave IPv6 alone.
 
 ### 4. Rules with no interface are floating, and floating comes first
 
@@ -285,6 +316,97 @@ is *not* a faithful simulation of the failure, because the kernel keeps the pref
 list and will not re-add an address from a duplicate RA immediately. Allow a good 15 seconds
 after `rtsol` before concluding it did not work.
 
+**A single `rtsol` is not enough on its own, but retrying inside one run buys nothing.** My
+first version fired once per run. My second version retried three times, 15 seconds apart.
+Watching a real reboot, the second version ran twelve solicitations across four minutes and
+none produced an address, and then one manual `rtsol` worked instantly. A packet capture
+explains why:
+
+```
+23:41:45.005  RS  fe80::be24:11ff:fee8:7581 > ff02::2
+23:41:45.016  RA  fe80::2e52:afff:feb5:db42 > ff02::1
+              mtu option (5):      1492
+              prefix info (3):     2408:8206:2650:3b2e::/64  [onlink, auto]
+```
+
+The upstream answers in **11 milliseconds** when it answers at all. So a solicitation never
+needs a retry loop: either the upstream is ready and it works immediately, or it is not and
+retrying three times in 45 seconds changes nothing. What matters is *how often you ask*, not
+how many times you ask per attempt.
+
+So the final shape is deliberately dumb: check for a global address, send one solicitation if
+there is none, exit. Cron every minute is the retry. That also makes the script an
+instantaneous no-op the rest of the time, which removed the need for the `mkdir` lock the
+retrying version required.
+
+Note that the RA also carries `mtu option 1492`, which is the ISP telling us the very thing
+gotcha 16 is about.
+
+**The bug that hid inside all of this: `rtsol` is in `/sbin`, not `/usr/sbin`.** Only `rtsold`
+lives in `/usr/sbin`, and I assumed they were siblings. So the watchdog ran
+`/usr/sbin/rtsol`, exited 127 on every single invocation, and cheerfully logged that it had
+solicited an RA. Every apparent recovery was actually a human running `rtsol` by hand, which
+resolves through `PATH`.
+
+It hid for an entire evening for one reason: `>/dev/null 2>&1`. The exit code was ignored and
+the error was thrown away, so the logs said the right thing while nothing happened. It only
+surfaced when someone asked whether the manual command and the scripted one were *exactly*
+the same, and running both side by side under a capture showed one RS on the wire instead of
+two.
+
+The lesson generalises past this script. In a watchdog, log the outcome, not the intent:
+
+```sh
+err=$("$RTSOL" "$ifn" 2>&1)
+rc=$?
+if [ $rc -eq 0 ]; then
+        logger -t ipv6-ra-watchdog "solicited an RA on ${ifn}${err:+ (${err})}"
+else
+        logger -t ipv6-ra-watchdog "rtsol on ${ifn} FAILED rc=${rc}${err:+: ${err}}"
+fi
+```
+
+Resolve the binary at runtime rather than hardcoding a guess, and fail loudly if it is not
+found:
+
+```sh
+RTSOL=$(command -v rtsol 2>/dev/null)
+[ -n "$RTSOL" ] || RTSOL=/sbin/rtsol
+[ -x "$RTSOL" ] || { logger -t ipv6-ra-watchdog "no executable rtsol at ${RTSOL}"; exit 1; }
+```
+
+With the path fixed, it finally self-heals. Removing the address by hand and then leaving it
+strictly alone:
+
+```
+23:47:41  removed 2408:8206:2650:3b2e:...
+23:48:00  ipv6-ra-watchdog - solicited an RA on pppoe0
+23:48:13  recovered, 30 seconds unattended
+```
+
+Where to look when it misbehaves, remembering that **`/var/log` is tmpfs here so all of this
+is wiped by the next reboot**:
+
+| What | Where |
+|---|---|
+| The watchdog's own messages | syslog tag `ipv6-ra-watchdog`, in `/var/log/system/latest.log` |
+| Whether configd ran the action | `/var/log/configd/latest.log`, grep the action name |
+| The job definition | System > Settings > Cron in the GUI |
+| The rendered crontab | `/var/cron/tabs/nobody` |
+
+Also add a hook in `/usr/local/etc/rc.syshook.d/start/` so it runs at boot rather than waiting
+for the first cron tick, backgrounded so a slow upstream cannot stall the boot. On a clean
+reboot that hook is what actually does the work, and the cron becomes a backstop:
+
+```
+23:52:02  ppp-linkup: executing on pppoe0 for inet6
+23:52:09  >>> Invoking start script 'ipv6-ra-watchdog'
+23:52:09  ipv6-ra-watchdog - solicited an RA on pppoe0
+```
+
+Seven seconds after the link came up, one solicitation, address acquired, no cron tick
+needed.
+
 ### 11. SLAAC or DHCPv6 on the PPPoE WAN? SLAAC.
 
 With NAT66 the router only needs one global address on the WAN, which SLAAC provides.
@@ -292,32 +414,65 @@ DHCPv6 would additionally fetch a delegated prefix, and that prefix goes complet
 when every VLAN is ULA. My ISP does not serve DHCPv6 reliably either, so SLAAC is both
 sufficient and the one that works.
 
-### 12. Most Chinese public IPv6 resolvers ignore ICMPv6
+### 12. Do not diagnose a monitor target while the uplink is broken
 
-dpinger can only monitor with ICMP, so both my IPv6 gateways read **Offline** while IPv6
-worked perfectly. What I measured:
+Both IPv6 gateways read **Offline**, so I tested a pile of public IPv6 resolvers from the
+router and concluded that Chinese public resolvers mostly ignore ICMPv6, then worked around
+it by clearing the monitor field so dpinger falls back to the gateway's own link-local first
+hop.
 
-| Target | Answers ICMPv6 |
-|---|---|
-| 2400:3200::1, 2402:4e00::, 240c::6666, 240e::6666 | no |
-| 2408:8899::8 | yes |
-| 2408:8000:1010:1::8 | yes |
-| The gateway's own link-local first hop | yes |
+That conclusion was wrong, and the reason is embarrassing: at the time I ran those tests the
+router's own IPv6 was dead, because of the `rtsol` bug in gotcha 10. I was measuring a broken
+uplink and blaming the targets. With IPv6 actually working, the same addresses answer fine:
 
-Clearing the monitor field makes dpinger fall back to the gateway address itself, which for
-an IPv6 gateway is the ISP's link-local first hop, and that answers reliably. You are then
-testing the link rather than the ISP's IPv6 transit, which is a real limitation but better
-than a permanently false Offline.
+| Target | Loss | Latency |
+|---|---|---|
+| 2400:3200::1 via Unicom | 0.0% | 5.7 ms |
+| 2400:3200:baba::1 via Mobile | 0.0% | 27.7 ms |
 
-A false Offline is not cosmetic. With **Skip rules when gateway is down** enabled, a
-gateway marked down can have its rules dropped from the ruleset, and it makes failover and
-alerting untrustworthy.
+So use real off-net monitor targets, one per ISP. They are strictly better than the
+link-local first hop, which only tells you the PPPoE session is alive and says nothing about
+whether the ISP is actually carrying your IPv6 traffic.
+
+The transferable lesson: **an Offline gateway is not evidence about the monitor target.** Fix
+connectivity first, then choose monitors, or you will design around a phantom.
+
+A false Offline still matters, though. With **Skip rules when gateway is down** enabled, a
+gateway marked down has its rules dropped from the ruleset, which is a second, independent way
+for IPv6 to vanish.
 
 ### 13. Gateway groups do nothing until the rules point at them
 
 I created four gateway groups as failover tiers and then left every policy rule pointing at
 an individual gateway. Groups existed, failover did not. Worth double-checking, because the
 groups page looks complete and gives no hint that nothing references them.
+
+What that costs you is worse than "no failover". Because **Skip rules when gateway is down**
+is enabled, losing the Unicom link removes the two default rules from the ruleset entirely.
+LAN_DEFAULT then falls through to its auto-created allow rule and follows the system default
+route, which still points at the dead link since default gateway switching is off. The other
+three VLANs have no fallback rule at all and hit the default deny. So a single uplink failure
+takes the whole network offline while a perfectly healthy second uplink sits idle.
+
+The fix is one field per rule:
+
+| Rule | From | To |
+|---|---|---|
+| CMCC v4 | CMCC_DHCP | CMCC_V4 |
+| CMCC v6 | CMCC_DHCP6 | CMCC_V6 |
+| Default v4 | CHINAUNICOM_PPPOE | UNICOM_V4 |
+| Default v6 | CHINAUNICOM_DHCP6 | UNICOM_V6 |
+
+One detail that looks like the change did not work: `pfctl -sr` renders the group's
+*currently active* gateway, so with tier 1 healthy the rules look byte-identical to before.
+The difference only shows when a tier goes down and OPNsense regenerates the ruleset. Verify
+by reading the stored config rather than the ruleset.
+
+Two related settings worth deciding at the same time. The default group trigger is
+`downlosslatency`, which fails over on packet loss or latency and can flap on a lossy line;
+plain `down` is calmer. And **default gateway switching** is off by default, so the router's
+*own* traffic, including Unbound's upstream queries and firmware checks, does not fail over
+even once your LAN rules do.
 
 ### 14. Cutting disk writes needs more than the two RAM disk checkboxes
 
@@ -456,6 +611,390 @@ The case that used to hang now completes, and so does a genuinely large transfer
 The pf `scrub ... max-mss` half is still worth adding as a belt-and-braces measure for any
 host that ignores the RA MTU, such as a device with a static IPv6 configuration.
 
+### 17. Forcing a VLAN through a proxy box: DHCP moves IPv4, RAs quietly keep IPv6
+
+The goal was to push one VLAN's traffic through a separate box running sing-box in TUN mode
+with fake-ip, so it bypasses the GFW, while leaving the other VLANs alone.
+
+The IPv4 half is two dnsmasq DHCP options under **Services > Dnsmasq DNS & DHCP > DHCP
+options**, with Interface set to the VLAN so the tag scopes them:
+
+```
+dhcp-option=tag:vtnet3,3,192.168.215.2        # option 3, router
+dhcp-option-force=tag:vtnet3,6,192.168.215.2  # option 6, dns-server
+```
+
+DNS needs **option-force**, not plain option. OPNsense already emits a global
+`dhcp-option=6,0.0.0.0`, meaning "this server", and without `force` that keeps winning.
+
+Five things to confirm on the proxy box *before* pointing clients at it, because if any of
+them is missing you have just blackholed a VLAN:
+
+- A static address outside the DHCP pool. If it takes a lease that later changes, every
+  client on the VLAN loses its default route at once.
+- `net.ipv4.ip_forward=1`.
+- Its own default route still points at the router, or you build a loop.
+- sing-box's `auto_route` must have installed a rule that catches *forwarded* traffic, not
+  just its own. Look for this in `ip rule show`, where the `iif lo` negation is the whole
+  point: `9003: not from all iif lo lookup 2022`.
+- DNS listening on the LAN address, not only on loopback. Mine bound `192.168.215.2:53` and
+  nothing on `127.0.0.1`, which is fine, but worth checking rather than assuming.
+
+You can verify the offer a client would get without reconfiguring anything, by pointing
+busybox's DHCP client at a script that only prints:
+
+```sh
+printf '#!/bin/sh\n[ "$1" = bound ] && echo "router=$router dns=$dns"\n' > /tmp/p.sh
+chmod +x /tmp/p.sh
+busybox udhcpc -i eth0 -n -q -f -t 3 -T 3 -s /tmp/p.sh
+```
+
+Because the script configures nothing, this is safe to run on the proxy box itself.
+
+**Now the trap. DHCP only carries IPv4.** Router Advertisements keep handing out the router
+as the IPv6 default route *and*, via RDNSS, as the IPv6 resolver. So a dual-stack client on
+that VLAN can still ask the router for names and get real answers, completely sidestepping
+the proxy.
+
+The obvious counter-argument is that it does not matter, because sing-box has only an
+`inet4_range` for fake-ip and returns no AAAA for anything. That is true and it does close
+the main path: a client using the DHCP-supplied resolver cannot learn an IPv6 address for a
+hostname at all. But the leak is about *which resolver the client picks*, and here is what
+the other one returns:
+
+| Domain | AAAA from the router's resolver |
+|---|---|
+| www.google.com | `2001::1` |
+| facebook.com | `2001::1` |
+| www.cloudflare.com | `2606:4700::6810:7b60` |
+| www.baidu.com | `2408:871a:...` |
+
+`2001::1` is a Teredo-prefix black hole, the classic GFW IPv6 poisoning answer. So a client
+that happens to use the RA-advertised resolver does not silently escape the proxy, it does
+something worse: Happy Eyeballs races IPv6 first, stalls on a poisoned address, and only
+then falls back. The symptom is a multi-second hang on exactly the sites the VLAN exists to
+fix. Windows and Android favour RA-supplied resolvers; glibc and systemd-resolved merge both
+lists and may try either.
+
+**The fix keeps IPv6 and removes only the advertised resolver.** Under Router
+Advertisements, per interface, there is an advanced checkbox **Enable DNS**, described as
+"Control the sending of the embedded DNS configuration (RFC 8106)". Turning it off drops the
+`RDNSS` and `DNSSL` blocks from `radvd.conf` while leaving the prefix and router lifetime
+intact, so clients keep IPv6 connectivity but learn their resolver only from DHCP.
+
+Four caveats:
+
+- Clients keep the previously advertised resolver until its lifetime expires. With no
+  explicit `AdvRDNSSLifetime` that is radvd's default of twice `MaxRtrAdvInterval`, about
+  twenty minutes here. A client reconnect is instant.
+- Encrypted DNS bypasses both resolvers. A browser doing DoH resolves names itself, gets a
+  real AAAA, and goes direct over IPv6 regardless of anything above.
+- **Do not add the router as a secondary resolver.** With fake-ip, a client that happens to
+  use the secondary gets a real address, so the domain-to-fake-IP mapping is lost and any
+  proxy rule that matches on domain silently stops applying. One resolver is correct here.
+- The fake-ip range `198.18.0.0/15` sits in the bogons table, so if the proxy box dies,
+  clients fail hard rather than quietly going direct. Arguably the honest behaviour.
+
+**One more self-test trap.** Querying the router's resolver *from the proxy box* returns a
+fake-ip, which looks like proof that IPv6 DNS is already being proxied. It is not. sing-box
+installs `9002: not from all dport 53 lookup main`, which hijacks port 53 on that host
+whatever the destination address. Any DNS test has to come from a different client.
+
+### 18. Test received wisdom before designing around it
+
+"Disable Shared forwarding on multi-WAN with IPv6" is the standing forum advice, and I took it
+on faith for this whole build. It cost me the traffic shaper, because policy routing plus
+shared-forwarding-off means dummynet never sees the traffic. When I finally wanted shaping, the
+advice and the requirement were in direct conflict, so I measured instead of guessing.
+
+**Result on 25.7 with ULA plus NAT66: enabling it broke nothing.** Both families, identical
+before and after.
+
+| Measurement | flag off | flag on |
+|---|---|---|
+| IPv6 egress address | `2408:8206:2650:4eb4:…` | same |
+| DF ping, 1432 B payload, v6 | 0% loss, 9.5 ms | 0% loss, 9.6 ms |
+| 5 MB over IPv6 | 206, 0.147 s | 206, 0.110 s |
+| 5 MB over IPv4 | not taken | 206, 1.32 s |
+| CMCC-destined v6, egress | vtnet1, CMCC source | vtnet1, CMCC source |
+| CMCC-destined v4, egress | vtnet1, `192.168.212.249` | vtnet1, `192.168.212.249` |
+
+The rows that matter are the last two, not whether a download succeeds. The likely failure mode
+is not an outage, it is policy routing silently stopping so everything leaves via the default
+uplink. Verify two independent ways: `pfctl -ss` shows each state's interface and NAT binding,
+and a `tcpdump` on each WAN shows which one physically carries the packets. A successful
+download proves nothing about which uplink it used.
+
+None of this makes the forum advice wrong in general. It may depend on version, or on NPTv6 and
+tracked interfaces rather than ULA plus NAT66, or on prefix delegation. It means it did not
+apply here, and an evening of measurement beat a year of repetition.
+
+**How to test it without locking yourself out.** This matters, because the IPv4 flag carries
+whatever remote access you have:
+
+1. **Arm a failsafe before touching anything**, and refuse to proceed if it fails to arm:
+   ```sh
+   daemon -f /bin/sh -c 'sleep 180; /sbin/sysctl net.pf.share_forward=0'
+   ```
+   Two more layers behind it: the sysctl is applied from config at boot, so a reboot resets it,
+   and console access to the VM is the last resort.
+2. **Know which address family your control channel uses.** Mine reached the router over IPv4
+   through a VPN, so I tested the IPv6 flag first, in isolation, where a mistake could not cut
+   my own access. Only once that was clean did I touch the IPv4 flag.
+3. **Change one sysctl at a time** rather than the GUI checkbox, which sets both at once.
+4. **Flush states for the test host between runs**, or you measure the old behaviour still
+   cached in the state table.
+
+**A warning about the instrumentation.** Three capture attempts returned zero packets and I
+nearly reported that as a finding. The cause was launching tcpdump through `daemon -f`: the
+process started, wrote its "listening on…" banner, then captured nothing. The identical command
+backgrounded with `&` plus a `wait` captured normally. Had I trusted those zeros I would have
+concluded IPv6 was broken while it was working perfectly. That is twice in one evening that
+broken tooling impersonated a broken network, the other being the `rtsol` exit-127 in gotcha 10.
+**When a measurement says "nothing at all", suspect the measurement first.**
+
+**Persisting it.** Ticking the box in the GUI is the normal route. From a script, the config key
+is `system/pf_share_forward`, `write_config()` needs `util.inc` loaded or it dies on an undefined
+`shell_safe()`, and the tunables are applied by `system_sysctl_configure()` in PHP. There is no
+configd action for it, since `system sysctl gather`, `values` and `defaults` are all read-only.
+
+
+### 19. Traffic shaping: the apply sequence is undocumented, and download shaping backfires
+
+Shaping only became possible after enabling Shared forwarding (gotcha 3), because policy
+routing otherwise keeps dummynet from ever seeing the traffic.
+
+**The apply sequence.** `configctl shaper reload` is not enough, and it returns `OK` while doing
+almost nothing. The full sequence is four steps, and skipping any one leaves you staring at a
+correct-looking config that has no effect:
+
+```sh
+configctl template reload OPNsense/Shaper   # writes /usr/local/etc/dnctl.conf
+configctl template reload OPNsense/IPFW     # writes ipfw.rules + rc.conf.d/ipfw
+configctl shaper reload                     # starts dnctl, loads the pipes
+/etc/rc.d/ipfw start                        # loads the classification rules
+```
+
+The pieces and why each matters:
+
+- Pipes live in **dummynet**, driven by `dnctl.conf`. `dnctl pipe show` proves they exist.
+- Classification is **ipfw**, not pf. There is no `dnpipe` in `pfctl -sr`, so do not look for it
+  there. `ipfw show | grep pipe` is the check.
+- `configctl shaper reload` only ever runs the `dnctl` branch of `scripts/shaper/start.sh`.
+  It never starts ipfw. That is why the pipes appeared while nothing was classified.
+- `firewall_enable` in `/etc/rc.conf.d/ipfw` is template-generated and flips to `YES` only once
+  an enabled pipe exists. Both that file and `dnctl_enable` gate startup, so boot persistence
+  comes free once the templates are regenerated.
+
+**The lockout worry is unfounded**, but check it yourself before starting ipfw. The generated
+ruleset ends:
+
+```
+add 65533 pass ip from any to any
+add 65534 deny all from any to any
+```
+
+The pass makes the deny unreachable, and once loaded `net.inet.ip.fw.default_to_accept` reads 1.
+I still armed `ipfw -q add 1 allow ip from any to any` on a timer before starting it, which was
+the right instinct for a firewall change that could strand a remote session. Note that if that
+failsafe fires it also bypasses your pipes, so cancel it before measuring anything.
+
+**Two model quirks.** A pipe needs a `number`, which is not auto-filled when you create one
+through the model; call `newPipeNumber()`. And a rule's `target` must reference an already-saved
+pipe, so pipes and rules need two separate save passes, exactly like aliases and the rules that
+use them.
+
+**Scoping to internet traffic only.** Attach the rules to the **WAN** interfaces. Inter-VLAN
+traffic never crosses `pppoe0` or `vtnet1`, so it is excluded structurally rather than by an
+address match that could be wrong:
+
+```
+add 60001 pipe 10001 ip from any to any out via pppoe0
+add 60002 pipe 10003 ip from any to any out via vtnet1
+```
+
+**Download shaping made things three times worse.** This was the real surprise. With a 285 Mbit
+pipe on a 300 Mbit line:
+
+| | Throughput |
+|---|---|
+| No shaping | 38-46 MB/s, 304-369 Mbit |
+| 285 Mbit pipe | 9-12.7 MB/s, 72-102 Mbit |
+
+The model caps a pipe's queue at 100 slots, roughly 150 KB, which is far below the
+bandwidth-delay product at that rate, so TCP never opens up. Raising
+`net.inet.ip.dummynet.pipe_slot_limit` does not help because the model's own validator rejects
+anything above 100. Conclusion: **do not shape a fast download direction with dummynet here.**
+There was no queueing problem in that direction anyway.
+
+**Upload shaping works, and does what it is for.** Same path, same server, only the cap changed:
+
+| CU upload cap | Throughput | Retransmits |
+|---|---|---|
+| unshaped | 14.3 Mbit | 432 |
+| 5 Mbit | 5.94 Mbit | 64 |
+
+An 85% drop in retransmits is the entire point. My China Mobile uplink sheds packets badly when
+its upload saturates, and capping slightly under line rate moves the queue into my router where
+fq_codel manages it, instead of into the ISP's buffer where it turns into loss.
+
+Final shape: **uploads only**, at roughly 90% of line rate, `fq_codel` with ECN.
+
+| Pipe | Cap | Rule |
+|---|---|---|
+| WAN_CU upload | 27 Mbit of 30 | opt1, out |
+| WAN_CMCC upload | 54 Mbit of 60 | wan, out |
+
+**Measure with a mirror that is not the bottleneck.** I nearly concluded the line was 147 Mbit
+and that shaping cost 30%. Both were wrong, because the Tsinghua mirror was capping me at
+18 MB/s. Switching to NJU showed the real 300+ Mbit and turned an ambiguous 30% into an
+unmistakable 3x. Before trusting any throughput number, confirm the far end can saturate you.
+
+**Leftovers to know about.** Deleting a pipe from the config does not remove it from the running
+kernel. Orphans linger in `dnctl pipe show` with no ipfw rule pointing at them, harmless but
+confusing. `dnctl pipe <n> delete` clears them, and a reboot would too.
+
+
+### 20. There is no DHCPv6 gateway option, and withdrawing the RA route de-routes your proxy box too
+
+Having pointed one VLAN's IPv4 at a proxy box with DHCP options 3 and 6, the obvious next
+step is to do the same for IPv6. You cannot. **DHCPv6 has no default-gateway option at
+all** — RFC 8415 deliberately omits one, on the grounds that routers are discovered via
+Router Advertisements. So the IPv4 trick of editing the DHCP server has no IPv6 equivalent,
+and the only lever is RAs.
+
+To hand the IPv6 default route to another box on the segment, set **Default Lifetime** to
+`0` in that interface's Router Advertisements. Its help text is "Lifetime in seconds this
+router is considered a valid default router", and zero means "I am not a router". The prefix
+block stays, so hosts keep their existing addresses and nothing renumbers:
+
+```
+interface vtnet3 {
+    AdvDefaultLifetime 0;
+    AdvLinkMTU 1492;
+    prefix fd42:192:168:215::/64 { ... };
+};
+```
+
+I preferred this over RFC 4191 router preference, where you advertise the proxy at high
+preference and the router at low. Preference support across clients is inconsistent, and a
+client that falls back to the low-preference router is precisely the leak you were trying to
+close. Lifetime zero is unambiguous.
+
+**The trap: your proxy box is also a client of that RA.** The instant the change applied,
+the proxy box lost its own IPv6 default route, because it had been learning it from the same
+advertisement. `ip -6 route show default` returned nothing. It now has no egress for its own
+upstream proxy connections, nor for any traffic it decides to route direct rather than
+tunnel. Nothing on the LAN complains, because clients were already not using IPv6 — the
+breakage is one hop further out and entirely silent.
+
+The fix is a static default route on the proxy box:
+
+```sh
+ip -6 route add default via fd42:192:168:215::1 dev eth0 metric 1
+```
+
+Use the router's **ULA**, not its link-local. Both work, but the link-local is derived from
+the NIC's MAC and the ULA is something you configured deliberately, so the ULA survives more
+kinds of change. Persist it however your distro does static routes; the command above is
+runtime only.
+
+**A second trap waiting on the same box.** Once you enable `net.ipv6.conf.all.forwarding=1`
+so it can actually route for others, Linux stops honouring RAs on that interface, because
+`accept_ra=1` means "accept only while not forwarding". If the box relies on SLAAC for its
+address you must also set `net.ipv6.conf.eth0.accept_ra=2`. If, like mine, it has a static
+address and now a static default route, `accept_ra=0` is the more deterministic choice for a
+router.
+
+**And the prerequisite that decides whether any of this is worth doing.** If the proxy's
+fake-ip has only an `inet4_range`, its resolver returns no AAAA for anything, so clients
+never learn an IPv6 address for a hostname and never initiate IPv6 no matter how the routing
+is arranged. Adding `inet6_range` is what makes the rest live. Without it you have built a
+correct IPv6 path that nothing will ever use.
+
+### 21. Making the proxy box a real IPv6 gateway: four changes, and one that bites twice
+
+The full Path B, in the order that avoids breaking things. Do the routing first. If clients
+learn AAAA before they have an IPv6 route, every dual-stack lookup stalls on Happy Eyeballs
+before falling back.
+
+**1. Forwarding, and the `accept_ra` trap.** `net.ipv6.conf.all.forwarding = 1`, but on
+Linux `accept_ra = 1` means "accept Router Advertisements *only while not forwarding*". The
+moment the box becomes a router it silently stops processing RAs, and if it was relying on
+SLAAC it loses its address and its default route. The usual answer is `accept_ra = 2`.
+
+Here `0` was better, because after step 4 nothing should come from RAs at all: the address
+is static, the default route is static, and the link MTU is pinned by a separate sysctl. The
+trap is that leaving it at `1` *appears* to work right up until forwarding is enabled.
+
+**2. The same change de-routes the proxy box itself.** Covered in gotcha 20: the upstream
+router now advertises `AdvDefaultLifetime 0`, and the proxy box was listening to that RA
+too. It needs a static IPv6 default route via the router's ULA. With ifupdown-ng that is one
+line in the `inet6` stanza, no `if-up.d` script needed:
+
+```
+iface eth0 inet6 static
+    address fd42:192:168:215::2/64
+    gateway fd42:192:168:215::1
+```
+
+`ifquery eth0` parses it without touching the live interface, which matters when the box you
+are editing is the VLAN's only way out.
+
+**3. radvd, with no prefix block.** The upstream router still advertises the prefix and is
+the authority for addressing; this RA exists only to hand out the default route, so
+addressing keeps a single owner. radvd 2.21 accepts an interface stanza with no `prefix` at
+all, which I half expected it to reject:
+
+```
+interface eth0 {
+    AdvSendAdvert on;
+    MinRtrAdvInterval 30;
+    MaxRtrAdvInterval 100;
+    AdvDefaultLifetime 300;      # must be 0, or between MaxRtrAdvInterval and 9000
+    AdvDefaultPreference high;
+    AdvLinkMTU 1492;
+};
+```
+
+Advertise the MTU here as well as upstream. Proxied flows are re-originated by the proxy so
+its own MSS applies, but flows it routes *direct* still egress the 1492-byte uplink, and a
+client that only hears this RA would otherwise assume 1500. Deliberately no `RDNSS`: clients
+get DNS from DHCP option 6, and an RA-advertised resolver would hand them a path to real
+answers and straight past the proxy.
+
+**4. Exclude the LAN ULAs from the tunnel, exactly as you did for IPv4.** This is the one I
+nearly missed. sing-box's `route_exclude_address` already listed the four LAN IPv4 subnets,
+for well-documented reasons. The IPv6 default in its policy-routing table has the same
+problem: it swallows VLAN-internal and inter-VLAN IPv6, which then matches no route rule,
+falls through to `final`, and gets proxied abroad — arriving at the router with the *proxy
+box's* source address instead of the client's, quietly defeating any source-based firewall
+rule. Add the ULA /64s next to the IPv4 subnets so only `2000::/3` and the fake range reach
+the tunnel.
+
+**Verification that actually proves it.** `getent ahostsv6` should return an address from
+your new fake range, and the API connection stream should show ULA-sourced flows splitting
+correctly:
+
+| Destination | Source | Rule | Outbound |
+|---|---|---|---|
+| www.google.com | ULA | `rule_set=ls-gfw` | proxied |
+| www.baidu.com | ULA | `rule_set=geoip-cn` | DIRECT |
+
+Seeing a *Chinese* destination go DIRECT from an IPv6 source is the important half. It shows
+the split is intact rather than everything being swept into the tunnel.
+
+**One more asymmetry, easy to miss.** For proxied traffic the client's address family and the
+proxy server's are independent: fake-ip hands sing-box a *domain*, so it passes the name
+upstream and the proxy resolves it however it likes. A client on IPv6 through an IPv4-only
+proxy works fine and the client never knows.
+
+The exception is your always-real-ip list. Those domains get real answers, so sing-box passes
+a literal IPv6 destination to the outbound, and a proxy server without IPv6 connectivity
+simply cannot reach it. I hit this with a Nintendo `ctest-ipv6` endpoint. If you proxy any
+real-IPv6 destinations, that outbound needs working IPv6 at the far end — which is a property
+of the server, invisible in your config, and worth checking before blaming the routing.
+
 ## Diagnostic techniques that actually worked
 
 Most of the wrong turns above came from trusting the GUI. What I would reach for first
@@ -469,6 +1008,25 @@ next time:
   viewer. Fields worth knowing: rule number, label, interface, action, direction, IP
   version, protocol, source, destination, source port, destination port.
 - `configctl interface gateways status` for the truth about dpinger.
+- To prove traffic really traverses the proxy rather than the ISP, query sing-box's API
+  directly. On recent versions this is a `services` entry of `type: api`, and it is **gRPC
+  with reflection**, not the Clash REST API, so every HTTP path just 302s to `/dashboard/`
+  and looks broken. Authenticate with a metadata header, not a query token:
+
+  ```sh
+  grpcurl -plaintext -H "authorization: Bearer $SECRET" HOST:19092 list
+  grpcurl -plaintext -H "authorization: Bearer $SECRET" -d '{"interval":1000}' \
+      HOST:19092 daemon.StartedService/SubscribeConnections
+  ```
+
+  The stream nests rows as `events[].connection`, not `connections[]`, which is easy to get
+  wrong and yields a confidently empty result. Each row carries `source`, `domain`, `rule`,
+  `outbound` and `chainList`, so you can see both the decision and the reason. Use the IP
+  rather than an SSH-config hostname alias, which grpcurl cannot resolve.
+
+  A lighter check needing no tooling: sing-box's tun *terminates* forwarded connections, so
+  `ss -tnp | grep sing-box` on the proxy box lists its upstream sockets, and `ip -s link show
+  tun0` gives byte counters.
 - To find what is writing to disk, scan the whole root filesystem with
   `find / -xdev -type f -newer <marker>` rather than guessing at directories, and split
   reads from writes with `iostat -x`, whose `kw/s` column is the one that matters. Note that
@@ -486,8 +1044,10 @@ next time:
 
 ## Still open
 
-- The International VLAN currently has unrestricted egress. The name implies it should
-  route somewhere specific, which is the next piece of work.
+- The International VLAN is done for both families and verified from a plain client on that
+  segment, across a reboot of the proxy box: DHCP supplies the IPv4 gateway and resolver,
+  radvd supplies the IPv6 default route, fake-ip answers AAAA out of `fc00::/18`, and both
+  families split correctly between the proxy and DIRECT. Gotchas 17, 20 and 21 record how.
 - The pf `scrub ... max-mss` half of gotcha 16 is not yet applied. The RA MTU half is.
 - `CT_NET4`, `CT_NET6`, `CU_NET4` and `CU_NET6` aliases are defined but referenced by
   nothing.

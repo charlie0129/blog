@@ -1,0 +1,15 @@
+curl -fsSL https://tailscale.com/install.sh | sh
+tailscale up
+tailscale set --accept-dns=false
+tailscale set --relay-server-port=xxx
+
+# Netavark incompatibility
+# Some native Tailscale expressions cannot be translated by that frontend. Listing the tables fails:
+#   table `nat' is incompatible, use 'nft' tool.
+#   Error: meta sreg is not an immediate
+Alpine /etc/conf.d/tailscale:
+add: firewall_mode="iptables"
+
+# Mostly unneeded
+# Ubuntu /etc/default/tailscaled:
+# add: TS_DEBUG_FIREWALL_MODE=iptables
