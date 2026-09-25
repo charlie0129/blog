@@ -995,6 +995,316 @@ simply cannot reach it. I hit this with a Nintendo `ctest-ipv6` endpoint. If you
 real-IPv6 destinations, that outbound needs working IPv6 at the far end — which is a property
 of the server, invisible in your config, and worth checking before blaming the routing.
 
+### 22. The RAM disks from gotchas 14 and 15 will eventually OOM-kill the box
+
+Gotchas 14 and 15 moved six directories to tmpfs to spare the virtual disk. That trade has a
+second half I did not think about: **tmpfs is RAM, this box has 2 GB and no swap, and nothing
+bounds what those directories accumulate.** Ten days later it collapsed.
+
+The dashboard showed four services down — Unbound, Gateway Watcher, Hostwatch, Insight
+Aggregator. It reads like four unrelated bugs. It is one.
+
+```
+Mem: 10M Active, 6660K Inact, 1290M Laundry, 465M Wired, 187M Free
+<3>kernel: pid 13506 (netstat),    was killed: failed to reclaim memory
+<3>kernel: pid 60151 (python3.13), was killed: failed to reclaim memory
+<3>kernel: pid 82293 (php),        was killed: failed to reclaim memory
+```
+
+**`Laundry` is the number to read.** It is dirty pages the pager wants to evict. With no swap
+it cannot, so they pile up permanently and the kernel resorts to killing processes — roughly
+once a minute. 1290 MB of a 2 GB box was tmpfs content:
+
+| Mount | Used | Size | |
+|---|---|---|---|
+| /var/log | 648M | 1.0G | 289M filter + 313M flowd.log |
+| /var/netflow | 252M | 256M | **98% — full** |
+| /var/db/hostwatch | 128M | 128M | **100% — full** |
+| /var/db/rrd, /var/unbound/data, misc | ~20M | | |
+| **total** | **~1.05 GB** | | |
+
+Each symptom follows from that one cause, and each failed differently enough to look
+independent:
+
+- **Insight Aggregator** died with `sqlite3.OperationalError: database or disk is full`.
+- **Hostwatch** `exited on signal 6`. Its mount was full because `hosts.db` was 4 MB and
+  `hosts.db-wal` was **124 MB** — checkpointing had stalled.
+- **Gateway Watcher** is a PHP process, and `php` was on the OOM kill list every minute. The
+  four per-gateway `dpinger` processes stayed up, which made it look like a watcher-specific
+  bug rather than memory pressure.
+- **Unbound** started cleanly, then its Python logging backend was OOM-killed 31 seconds
+  later, leaving thousands of `dnsbl_module: no logging backend found` lines. I had already
+  moved it to port 53153 and put dnsmasq on 53, convinced it was a port conflict. It was not.
+  **A service that dies repeatedly and a service that dies for the reason you assume are
+  different claims.** Check `Laundry` before you rearrange anything.
+
+It is also a spiral rather than a cliff: 0 OOM kills through the 22nd, 3 on the 23rd, 4 on the
+24th, 22 by lunchtime on the 25th. Log rotation and RRD collection are themselves cron/PHP
+jobs, so they get killed too, so logs stop being pruned, so pressure worsens.
+
+#### The knobs, and why the obvious ones do not do what they say
+
+**`System > Settings > Logging`.** Two fields, both softer than they look, because enforcement
+is `/usr/local/opnsense/scripts/syslog/log_archive` run from cron **at minute 1 of each hour**:
+
+- `maxfilesize` is a rotation *trigger checked hourly*, not a cap. The filter log grows
+  ~9 MB/hour, so with `maxfilesize=2` I still had 8–9 MB files.
+- `maxpreserve` is a **file count per log subject, not days** — `log_archive` line 84 is
+  `count($items) > $preserve_logs`. Slow subjects rotate daily, so 31 means 31 days. The
+  filter log rotates hourly, so 31 meant ~31 hours and 289 MB. One knob, wildly different
+  real durations per subject.
+
+**`System > Settings > Miscellaneous`.** `max_mfs_var` and `max_mfs_tmp` are a **percent of
+physmem, defaulting to 50%** (`/usr/local/etc/rc.subr.d/{var,tmp}`). Unset, that gave me
+`/var/log`, `/tmp` *and* `/var/lib/php/tmp` at 1.0 GB each on a 2 GB box. They are applied at
+mount time, so **changing them needs a reboot.**
+
+This is the most useful knob, and not because of the size. A full tmpfs fails *gracefully* —
+syslog-ng drops lines. Unbounded tmpfs growth OOM-kills Unbound and the gateway watcher. The
+cap converts a fatal failure mode into a benign one.
+
+**Netflow/Insight has no GUI knob at all** — no `models/OPNsense/Netflow` exists. Retention is
+hardcoded in the aggregate classes:
+
+| Aggregate | Stock retention |
+|---|---|
+| interface / dst_port / src_addr | 300s→1h, 3600s→1d, 86400s→**365 days** |
+| src_addr_details | 86400s→**62 days** |
+
+`src_addr_details` was 130 MB on its own, because its `agg_fields` are
+`if, direction, src_addr, dst_addr, service_port, protocol` — one row per (src, dst, port,
+proto) per day. Measured here: **~15 MB/day.** Even 7 days is 105 MB, so on a 256 MB mount
+the stock 62 days cannot possibly fit.
+
+**Hostwatch** does have a GUI (`Interfaces > Neighbors > Automatic Discovery`), and two fields
+were empty: `expire4_interval`/`expire6_interval` (unset = entries *never* expire) and
+`interface` (unset = bind **all** interfaces). The second is the real bomb — it was capturing
+on `vtnet1` (the CMCC WAN) and on an unassigned NIC, so every internet peer address seen on
+the WAN was being written into the database. Expiry alone would not have fixed that.
+
+#### What I set
+
+| Where | Setting | Stock | Now |
+|---|---|---|---|
+| Logging | `maxfilesize` | 2 | 8 |
+| Logging | `maxpreserve` | 31 | 3 |
+| Miscellaneous | `max_mfs_var` (`/var/log`) | 50% | 15% (300 MB) |
+| Miscellaneous | `max_mfs_tmp` (`/tmp`, `/var/lib/php/tmp`) | 50% | 10% (200 MB each) |
+| `flowd_aggregate.py` | `MAX_LOGS` | 10 | 3 |
+| `source.py` | src_addr_details daily | 62d | 2d |
+| `source.py` | src_addr daily | 365d | 2d |
+| `ports.py` | dst_port daily | 365d | 2d |
+| Auto Discovery | `expire4_interval` | unset | 604800 (7d) |
+| Auto Discovery | `expire6_interval` | unset | 86400 (1d) |
+| Auto Discovery | `interface` | all | `lan,opt2,opt3,opt4` |
+
+`interface.py` is deliberately untouched: `interface_*.sqlite` was ~10 MB of the 252 MB and it
+is what the bandwidth graphs read. Its 365-day daily rollup costs 32 KB.
+
+IPv6 expires faster than IPv4 on purpose — privacy addresses churn, so they are most of the
+row count.
+
+**Sizing the caps from measurement, not taste.** `/var/log` is the only one of the three that
+grows: 21 MB after two hours, essentially all of it the filter log at ~9 MB/hour. Steady state
+is 3 filter files at ~10 MB, `flowd.log` at ~40 MB, and a few MB of everything else, so
+**~75–85 MB**. 15% of 2 GB is 300 MB, about 3.7× headroom. `/tmp` and `/var/lib/php/tmp` sit
+at 1–2 MB, so 10% is already generous.
+
+The number that matters is not the individual cap but the sum, because `max_mfs_tmp` caps
+*two* mounts. At 25% the three together could reach 1503 MB on a 2005 MB box — still enough to
+OOM. At 15/10 the worst case is 700 MB. The check script prints that total, since it is the
+figure that actually bounds the failure.
+
+Result: tmpfs from ~1.05 GB to ~25 MB, `/var/netflow` 252 MB → 60 MB, `Laundry` 1290 MB → 0,
+free memory 187 MB → 1168 MB, and all 23 services up.
+
+#### Four caveats that cost me time
+
+**1. A full SQLite mount cannot be fixed in place.** With 4.2 MB free, shortening retention did
+not help — the aggregator died at `__init__.py:209`, the `DELETE` itself, because SQLite needs
+rollback-journal space to delete rows, and `VACUUM` needs roughly the database size again.
+Chicken and egg: the new retention could not be applied because applying it needs space.
+`mount -u -o size=` is not an escape hatch either — tmpfs rejects the update because the
+existing `mode` option is not updatable. What worked was moving each database to UFS, trimming
+and vacuuming it there, and moving it back small (`/root/netflow-ramfix-vacuum.py`).
+
+**2. `log_archive` can get permanently stuck, and it fails silently.** At 07:01 it renamed
+`filter_20260925.log` to `.0008.log` and called `system_syslog_start()` to reload syslog-ng —
+and *that PHP process was OOM-killed*. So syslog-ng kept writing into the renamed file and the
+canonical name no longer existed. On every later run, `preg_match('/.*_(\d){8}\.log$/')` fails
+against `filter_20260925.0008.log`, so the script takes `else { continue; }` — "already
+rotated" — which skips the pruning block entirely. The subject is stuck forever: it grew to
+61 MB with `maxpreserve=3` in force. The tell is a **dangling or non-canonical
+`latest.log`**, and the fix is `service syslog-ng restart` to get back onto
+`<subject>_YYYYMMDD.log`. Worth checking for explicitly; nothing logs it.
+
+**3. Three of these settings are OPNsense core files** and are reverted by every
+`opnsense-update`. Hence `/root/netflow-ramfix-patch.py` (idempotent, converges from stock or
+from any previous local value, keeps a `.stock` copy) and the check script below.
+
+**4. tmpfs means this data does not survive a reboot anyway** — which makes long retention
+doubly pointless here. `/var/netflow` and `/var/db/hostwatch` come back empty every boot, as
+gotcha 14 noted and the stray-address hunt at the end of this post ran into.
+
+One thing I got wrong and should record: I cleared the 124 MB `hosts.db-wal` to reclaim RAM,
+and Hostwatch then refused to start with `DatabaseCorrupt: database disk image is malformed`.
+Whether the mount filling mid-write had already torn it or discarding the WAL finished it off,
+the lesson is the same — **deleting a WAL is not a free space win, it is a rollback of
+everything not yet checkpointed.** The database had to be recreated. No real loss for a
+discovery cache, but do not do that to something you care about.
+
+### 23. After a reboot the PPPoE v6 gateway monitor never starts, and the obvious restart is a no-op
+
+Related to gotcha 10, and it bit on the reboot that applied `max_mfs_*`. Sequence:
+
+1. `rc.bootup` sets up gateway monitors at 13:46:43. `pppoe0` has no global IPv6 yet, so:
+   `The required GW_CU_V6 IPv6 interface address could not be found, skipping.`
+2. `ipv6-ra-watchdog` solicits an RA a minute later and the address appears.
+3. Nothing re-runs gateway monitor setup. `GW_CU_V6` stays Offline indefinitely.
+
+The watchdog fixes the *address*; it does not fix everything that gave up waiting for the
+address.
+
+**And the trap that cost the most time here.** The service definition lists
+`dpinger_configure_do` as its restart function, so I reached for:
+
+```sh
+pluginctl -c dpinger_configure_do        # silently does nothing
+```
+
+`pluginctl -c` takes a **hook name**, not a function name. `dpinger.inc` registers
+`'monitor' => ['dpinger_configure_do:2']`, so the hook is `monitor`:
+
+```sh
+pluginctl -c monitor                     # "Setting up gateway monitor...done."
+```
+
+The no-op version prints nothing, logs nothing, and exits 0. The tell was that the *other*
+three dpinger PIDs never changed across repeated runs — a restart that restarts nothing.
+**When a restart command produces no observable change, verify it ran at all before believing
+what it implies about the thing you are debugging.**
+
+Two smaller things found while reading that code path:
+
+- `dpinger.inc` has **no `require` statements at all** and depends on its caller having loaded
+  `system.inc` for `system_host_route()`. Fine from `pluginctl` and php-fpm, a fatal from a
+  hand-rolled script — which briefly sent me down the wrong path.
+- Its empty-property guard is a real bug: `foreach (['monitor','gateway'] as $key) { if
+  (empty(...)) { ... continue; } }` — that `continue` exits the inner loop over the two key
+  names, not the gateway loop, so it logs "Skipping gateway" and then does not skip it.
+
+#### Fixing it properly rather than re-running by hand
+
+The watchdog is the right place, since it already owns "the PPPoE link's IPv6 is not healthy
+yet" and already has a once-a-minute retry loop. But the naive version — run
+`pluginctl -c monitor` after every successful solicit — is worse than doing nothing, because
+that hook restarts **every** dpinger, and these gateways have `monitor_killstates=1`. A
+spurious down→up transition would kill states and drop live connections once a minute.
+
+So the trigger is not "we solicited" but **"this interface has a global address and no dpinger
+is bound to it"**:
+
+```sh
+monitor_bound_to()          # is some dpinger already using this source address?
+{
+	[ -n "$1" ] || return 1
+	/bin/pgrep -f "dpinger.*-B $1" >/dev/null 2>&1
+}
+```
+
+Checking the *bind address* rather than just "is dpinger running" also catches the re-dial
+case, where a monitor is alive but pinned to the retired prefix. Three further details:
+
+- The address does not exist the instant `rtsol` returns — DAD takes a moment. The script waits
+  up to 10 seconds after a successful solicit rather than leaving it to the next tick.
+- It also runs the check on the *already healthy* path, so a monitor that died for an unrelated
+  reason (an OOM kill, per gotcha 22) gets repaired too.
+- A stamp file rate-limits the hook to once per 10 minutes, so a persistent failure cannot
+  become a restart storm. That stamp lives in `/var/run`, which is **UFS and survives a
+  reboot**, so the boot hook deletes it first — otherwise a stamp written minutes before
+  shutdown would suppress exactly the post-boot recovery this exists to perform.
+
+Worth verifying all three states rather than assuming, because two of them are silent:
+
+| State | Expected | Observed |
+|---|---|---|
+| healthy, monitor bound | no action at all | exits in 0.01 s, nothing logged, no stamp written |
+| monitor killed | hook re-run, gateway back | `re-ran monitor hook for pppoe0, dpinger now bound to 2408:…` |
+| killed again immediately | suppressed | `…but ran the monitor hook 14s ago; waiting` |
+
+The first row is the one to actually check. A watchdog that quietly restarts your gateways
+every minute looks identical to a working one until you read the logs.
+
+Keeping to this script's own earlier lesson: it logs the **outcome**, re-reading the bind
+address after the hook rather than reporting that it ran the hook. Getting that right needed
+two corrections that only showed up across a real reboot:
+
+**The hook starts dpinger in the background**, so checking the instant `pluginctl` returns
+reported `still no dpinger bound` about a monitor that came up moments later — on the boot
+after the fix, the honest figure was **3 seconds**. A verification that runs before the thing
+it verifies could possibly be true is worse than no verification, because it manufactures
+false alarms in exactly the situation you wrote it for.
+
+**And `rc.syshook.d` executes every file in the directory, whatever it is called.** My own
+`99-ipv6-ra-watchdog.bak`, left beside the real hook, ran at boot as a second concurrent copy:
+
+```
+>>> Invoking start script 'ipv6-ra-watchdog'
+>>> Invoking start script 'ipv6-ra-watchdog.bak'
+```
+
+Two copies raced, and the stale one spent the rate-limit budget while the current one was
+still waiting for DAD. So the script now takes an exclusive `flock` (`-n -E 0`, so a second
+instance exits 0 silently), and the checker fails on any `.bak`/`.orig`/`~` under
+`rc.syshook.d`. **Never leave a backup next to a file that lives in a run-everything
+directory** — use a path the runner does not scan.
+
+A clean boot now reads:
+
+```
+ipv6-ra-watchdog: solicited an RA on pppoe0
+ipv6-ra-watchdog: global address 2408:…:27ac:…:7581 appeared on pppoe0 after 0s
+ipv6-ra-watchdog: re-ran monitor hook for pppoe0, dpinger bound to 2408:…:27ac:…:7581 after 3s
+```
+
+### Checking all of this after an update
+
+Three of the settings above live in files `opnsense-update` overwrites, and the blog's earlier
+gotchas have the same property. Everything hand-installed on this box now has a copy in this
+post's directory, so the post is the source of truth rather than the running machine:
+
+| File | Installed at | Why it is here |
+|---|---|---|
+| `check-opnsense-quirks.sh` | `/root/` | verifies every deviation below, exits non-zero on FAIL |
+| `netflow-ramfix-patch.py` | `/root/` | re-applies the three core-file patches after an update |
+| `netflow-ramfix-vacuum.py` | `/root/` | trims + vacuums the netflow dbs on UFS when the mount is too full to do it in place |
+| `ipv6-ra-watchdog` | `/usr/local/sbin/` | gotcha 10 + the gotcha 23 monitor repair |
+| `99-ipv6-ra-watchdog` | `/usr/local/etc/rc.syshook.d/start/` | boot hook, and clears the rate-limit stamp |
+
+`check-opnsense-quirks.sh` verifies:
+
+- memory: free, `Laundry`, OOM kills in today's log
+- every tmpfs mount's fill level with 70%/90% thresholds, each capped mount against **the
+  percentage actually in config.xml** (so "edited but not rebooted" shows up as a WARN rather
+  than passing), and the **sum** of the three capped mounts against physical RAM
+- the config.xml settings, which survive updates but are easy to undo in the GUI
+- the core-file patches, which do not survive updates
+- rotation-stuck log subjects (dangling/non-canonical `latest.log`), per caveat 2
+- `hosts.db-wal` size, as an early warning of the stalled-checkpoint failure
+- the gotcha 10 watchdog: script, boot hook, configd action with its `description:` line, the
+  cron entry, **and** that both halves of the gotcha 23 repair are still present — those two
+  files are hand-installed, so a restore from backup can silently lose them. The cron entry
+  renders into `/var/cron/tabs/**nobody**`, not `tabs/root`, because model-defined jobs invoke
+  `configctl`. I looked in the wrong file first and briefly "found" a regression that was not
+  there.
+- the gotcha 14/15 tmpfs entries *and their ownership*, since mounting tmpfs resets it
+- `net.pf.share_forward{,6}=1` (gotcha 3) and `state-policy if-bound` (gotcha 8)
+- all services running, all gateways Online, with the gotcha 23 hint when one is not
+
+Verify a checker can fail before trusting it. Pointing it at the `.stock` backups turns all
+six core-file checks red and the exit code to 1, which is the only evidence that the green run
+means anything.
+
 ## Diagnostic techniques that actually worked
 
 Most of the wrong turns above came from trusting the GUI. What I would reach for first
@@ -1053,6 +1363,14 @@ next time:
   nothing.
 - A VM ARPs every ten seconds for a `172.24.0.0/13` address belonging to a games console
   on the same segment. Harmless, but I have not identified which piece of software does it.
+- `ipv6-ra-watchdog` now repairs the gateway monitor as well as the address, so `GW_CU_V6` no
+  longer needs a manual `pluginctl -c monitor` after a reboot. Gotcha 23. Not yet observed
+  across a real reboot, only against a killed dpinger.
+- `max_mfs_var`/`max_mfs_tmp` lowered to 15%/10%, so the three capped mounts total 700 MB
+  worst case instead of 1503 MB. **Pending a reboot to take effect** — the check script WARNs
+  until then.
+- The box has no swap. Everything in gotcha 22 is really a symptom of that plus 2 GB of RAM;
+  4 GB would make the whole class of failure go away.
 
 ## Tracking down a stray address, and a lesson about volatile logs
 

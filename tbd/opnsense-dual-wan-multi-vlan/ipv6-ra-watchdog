@@ -1,0 +1,172 @@
+#!/bin/sh
+# Re-solicit an IPv6 Router Advertisement on WAN interfaces configured for SLAAC
+# that are up but hold no global address, and make sure the gateway monitor for
+# that interface is actually running against the current address.
+#
+# rtsold sends at most MAX_RTR_SOLICITATIONS router solicitations and then waits
+# for an unsolicited RA. On a PPPoE link the session regularly comes up after
+# that window has closed, and this ISP does not send unsolicited RAs often
+# enough to recover, so the interface sits with only a link-local address. This
+# happens on every boot.
+#
+# One solicitation per run, no retry loop. A packet capture shows the upstream
+# answering an RS in about 11 ms when it answers at all, so retrying within a
+# single run buys nothing. Cron every minute is the retry.
+#
+# NOTE: rtsol lives in /sbin, NOT next to rtsold in /usr/sbin. An earlier version
+# of this script hardcoded /usr/sbin/rtsol, which silently exited 127 on every
+# run while still logging that it had solicited. Never discard stderr here.
+#
+# SECOND JOB: recovering the address is not enough. rc.bootup sets up gateway
+# monitors before the PPPoE RA arrives, logs "The required <gw> IPv6 interface
+# address could not be found, skipping", and nothing ever retries -- so the v6
+# gateway stays Offline until the monitor hook is re-run by hand. We do that
+# here, but only when a monitor is genuinely absent or bound to a stale address,
+# because the hook restarts every dpinger and monitor_killstates=1 means a
+# spurious down->up transition can kill states and drop live connections.
+#
+# The hook is 'monitor'. `pluginctl -c dpinger_configure_do` is a silent no-op:
+# -c takes a hook name, not a function name, and prints nothing while exiting 0.
+#
+# Installed by hand, not by a package. Called from the ipv6watchdog configd
+# action and from rc.syshook.d/start at boot.
+
+IFACES=${1:-"pppoe0"}
+
+# Seconds to wait for SLAAC (including DAD) to finish after a successful RS.
+ADDR_WAIT=10
+# Seconds to wait for dpinger to appear after running the monitor hook. The hook
+# launches it in the background, so checking the instant pluginctl returns
+# reports a failure that did not happen -- an earlier version of this script did
+# exactly that and logged "still no dpinger bound" about a monitor that came up
+# a second later. Verify the outcome, but give it time to become true.
+MONITOR_WAIT=10
+# Never re-run the monitor hook more often than this, so a persistent failure
+# cannot turn into a dpinger restart storm. Cleared at boot by the syshook.
+HOOK_STAMP=/var/run/ipv6-ra-watchdog.monitor-stamp
+HOOK_MIN_INTERVAL=600
+# Only one instance at a time. At boot the syshook and the first cron tick can
+# fire within the same second; concurrent runs raced each other and one spent
+# the rate-limit budget above while the other was still settling.
+LOCK=/var/run/ipv6-ra-watchdog.lock
+
+if [ -z "$_IPV6_RA_WATCHDOG_LOCKED" ] && [ -x /usr/local/bin/flock ]; then
+	_IPV6_RA_WATCHDOG_LOCKED=1
+	export _IPV6_RA_WATCHDOG_LOCKED
+	# -n: do not wait for the lock. -E 0: exit 0 when another run holds it.
+	exec /usr/local/bin/flock -n -E 0 "$LOCK" "$0" "$@"
+fi
+
+RTSOL=$(command -v rtsol 2>/dev/null)
+[ -n "$RTSOL" ] || RTSOL=/sbin/rtsol
+
+if [ ! -x "$RTSOL" ]; then
+	/usr/bin/logger -t ipv6-ra-watchdog "cannot find an executable rtsol, tried '${RTSOL}'"
+	exit 1
+fi
+
+# a global address is any inet6 that is not link-local
+has_global()
+{
+	/sbin/ifconfig "$1" inet6 2>/dev/null \
+		| /usr/bin/awk '/inet6 /{print $2}' \
+		| /usr/bin/grep -qv '^fe80:'
+}
+
+# first global address on an interface, empty if none
+global_addr()
+{
+	/sbin/ifconfig "$1" inet6 2>/dev/null \
+		| /usr/bin/awk '/inet6 /{print $2}' \
+		| /usr/bin/grep -v '^fe80:' \
+		| /usr/bin/head -1
+}
+
+# is some dpinger already monitoring from this exact source address?
+monitor_bound_to()
+{
+	[ -n "$1" ] || return 1
+	/bin/pgrep -f "dpinger.*-B $1" >/dev/null 2>&1
+}
+
+# Re-run the gateway monitor hook if this interface has a global address but no
+# dpinger bound to it. Logs the outcome, not the intent.
+ensure_monitor()
+{
+	_ifn=$1
+	_addr=$(global_addr "$_ifn")
+	[ -n "$_addr" ] || return 0
+	monitor_bound_to "$_addr" && return 0
+
+	_now=$(/bin/date +%s)
+	if [ -f "$HOOK_STAMP" ]; then
+		_last=$(/bin/cat "$HOOK_STAMP" 2>/dev/null)
+		case $_last in ''|*[!0-9]*) _last=0 ;; esac
+		_age=$((_now - _last))
+		if [ "$_age" -lt "$HOOK_MIN_INTERVAL" ]; then
+			/usr/bin/logger -t ipv6-ra-watchdog \
+				"no dpinger bound to ${_addr} on ${_ifn}, but ran the monitor hook ${_age}s ago; waiting"
+			return 0
+		fi
+	fi
+	echo "$_now" > "$HOOK_STAMP"
+
+	_err=$(/usr/local/sbin/pluginctl -c monitor 2>&1)
+	_rc=$?
+
+	# dpinger is started in the background by the hook, so wait for it rather
+	# than reporting on state that has not had a chance to exist yet.
+	_n=0
+	while [ "$_n" -lt "$MONITOR_WAIT" ]; do
+		monitor_bound_to "$(global_addr "$_ifn")" && break
+		/bin/sleep 1
+		_n=$((_n + 1))
+	done
+
+	_now_addr=$(global_addr "$_ifn")
+	if monitor_bound_to "$_now_addr"; then
+		/usr/bin/logger -t ipv6-ra-watchdog \
+			"re-ran monitor hook for ${_ifn}, dpinger bound to ${_now_addr} after ${_n}s"
+	else
+		/usr/bin/logger -t ipv6-ra-watchdog \
+			"re-ran monitor hook for ${_ifn} but no dpinger bound to ${_now_addr} after ${_n}s (rc=${_rc})${_err:+: ${_err}}"
+	fi
+}
+
+for ifn in $IFACES; do
+	/sbin/ifconfig "$ifn" >/dev/null 2>&1 || continue
+	/sbin/ifconfig "$ifn" | /usr/bin/grep -q "flags=.*[<,]UP[,>]" || continue
+
+	# Address already fine. Still check the monitor: the usual failure is that
+	# the address arrived *after* rc.bootup gave up on it.
+	if has_global "$ifn"; then
+		ensure_monitor "$ifn"
+		continue
+	fi
+
+	err=$("$RTSOL" "$ifn" 2>&1)
+	rc=$?
+	if [ $rc -eq 0 ]; then
+		/usr/bin/logger -t ipv6-ra-watchdog "solicited an RA on ${ifn}${err:+ (${err})}"
+	else
+		/usr/bin/logger -t ipv6-ra-watchdog "rtsol on ${ifn} FAILED rc=${rc}${err:+: ${err}}"
+		continue
+	fi
+
+	# Wait a bounded time for SLAAC to finish, then set the monitor up against
+	# the address we just gained rather than leaving it for the next tick.
+	n=0
+	while [ "$n" -lt "$ADDR_WAIT" ]; do
+		has_global "$ifn" && break
+		/bin/sleep 1
+		n=$((n + 1))
+	done
+
+	if has_global "$ifn"; then
+		/usr/bin/logger -t ipv6-ra-watchdog \
+			"global address $(global_addr "$ifn") appeared on ${ifn} after ${n}s"
+		ensure_monitor "$ifn"
+	fi
+done
+
+exit 0

@@ -1,0 +1,9 @@
+#!/bin/sh
+# Recover the WAN IPv6 address at boot without waiting for the first cron tick.
+# Backgrounded so a slow upstream cannot hold up the rest of the boot.
+#
+# Clear the monitor-hook rate-limit stamp first: /var/run is on UFS and survives
+# a reboot, so a stamp written minutes before shutdown would otherwise suppress
+# exactly the post-boot recovery this hook exists to perform.
+rm -f /var/run/ipv6-ra-watchdog.monitor-stamp
+/usr/local/sbin/ipv6-ra-watchdog >/dev/null 2>&1 &
