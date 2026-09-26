@@ -203,6 +203,8 @@ fi
 : "${ENABLE_BBR:=yes}"
 : "${UFW_ALLOW:=}"
 : "${EXTRA_TOOLS:=}"
+: "${PODMAN_IPV6:=no}"
+: "${PODMAN_IPV6_SUBNET:=}"
 : "${DOTFILES_REPO:=https://github.com/charlie0129/dotfiles.git}"
 : "${DOTFILES_DIR:=/root/.dotfiles}"
 : "${DOTFILES_SHELL:=zsh}"
@@ -253,6 +255,20 @@ esac
 case "$PARTITION_TABLE" in gpt | mbr) ;; *) die "PARTITION_TABLE must be gpt or mbr" ;; esac
 case "$BOOT_MODE" in both | bios | uefi) ;; *) die "BOOT_MODE must be both, bios or uefi" ;; esac
 case "$GRUB_CFG_MODE" in auto | static) ;; *) die "GRUB_CFG_MODE must be auto or static" ;; esac
+case "$PODMAN_IPV6" in yes | no) ;; *) die "PODMAN_IPV6 must be yes or no" ;; esac
+
+# A dual-stack network on a host that will not forward IPv6 is a network whose
+# containers have an address and no route.
+if [ -n "$PODMAN_IPV6_SUBNET" ] && [ "$PODMAN_IPV6" != yes ]; then
+	die "PODMAN_IPV6_SUBNET needs PODMAN_IPV6=yes"
+fi
+
+# The hook derives the gateway by appending 1 to the prefix, which is only
+# correct for a prefix written out to its own ::.
+case "$PODMAN_IPV6_SUBNET" in
+'' | *::/*) ;;
+*) die "PODMAN_IPV6_SUBNET must end in ::/<prefixlen>, e.g. fd42:88::/64" ;;
+esac
 
 case "$ARCH" in
 x86_64)
@@ -1068,7 +1084,8 @@ if [ -n "$HOOKS" ]; then
 		BTRFS_SUBVOL IMAGE_HOSTNAME TIMEZONE SSH_AUTHORIZED_KEYS \
 		SSH_PERMIT_ROOT_LOGIN SSH_PORT NETWORK NETWORK_INTERFACE IPV6 \
 		IP_ADDRESS GATEWAY DNS NTP_POOL ZRAM_ALGO ZRAM_SWAP_RATIO \
-		ZRAM_TMP ENABLE_BBR UFW_ALLOW EXTRA_TOOLS \
+		ZRAM_TMP ENABLE_BBR UFW_ALLOW EXTRA_TOOLS PODMAN_IPV6 \
+		PODMAN_IPV6_SUBNET \
 		DOTFILES_REPO DOTFILES_DIR DOTFILES_SHELL DOTFILES_Z4H; do
 		eval "value=\$$var"
 		# shellcheck disable=SC2154  # assigned by the eval above

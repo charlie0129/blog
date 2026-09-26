@@ -90,6 +90,22 @@ symlink_to() { [ -L "$2" ] && [ "$(readlink "$2")" = "$1" ]; }
 
 iface_has_ipv4() { ip -4 addr show "$1" 2>/dev/null | grep -q 'inet '; }
 
+# accept_ra=1 means "accept RAs only while not forwarding", so that value
+# combined with forwarding is the trap: the machine silently stops configuring
+# itself from RAs at the next boot. 0 (userspace handles them) and 2 (accept
+# them anyway) are both fine. Checked as configuration rather than as a live
+# default route, which a network without IPv6 would not have either.
+ra_survives_forwarding() {
+	[ "$(cat /proc/sys/net/ipv6/conf/all/forwarding 2>/dev/null)" = 1 ] || return 0
+	[ "$(cat "/proc/sys/net/ipv6/conf/$1/accept_ra" 2>/dev/null)" != 1 ]
+}
+
+# network_has_subnet <network> <cidr>
+network_has_subnet() {
+	podman network inspect "$1" --format '{{range .Subnets}}{{.Subnet}} {{end}}' 2>/dev/null |
+		tr ' ' '\n' | grep -qx "$2"
+}
+
 root_is_writable() { touch /.selftest && rm -f /.selftest; }
 
 # Not `not ls -A`: ls exits 0 on an empty directory, so that reads correctly
@@ -379,6 +395,26 @@ start() {
 		# fetch something only the server can answer.
 		check "93-podman: the docker CLI reaches the podman API" \
 			docker version --format '{{.Server.Version}}'
+		if [ "$EXPECT_PODMAN_IPV6" = yes ]; then
+			check "93-podman: IPv6 forwarding enabled" \
+				output_is 1 cat /proc/sys/net/ipv6/conf/all/forwarding
+			check "93-podman: RA handling survives forwarding" \
+				ra_survives_forwarding "$EXPECT_IFACE"
+			info "IPv6 default route: $(ip -6 route show default 2>/dev/null | head -1)"
+		else
+			skip "93-podman: IPv6 (disabled)"
+		fi
+		# Asks podman, not the filesystem: a config it rejects is skipped with
+		# nothing but a warning, and the network then quietly has no IPv6 at all.
+		if [ -n "$EXPECT_PODMAN_IPV6_SUBNET" ]; then
+			check "93-podman: default network is dual stack" \
+				output_is true podman network inspect podman \
+				--format '{{.IPv6Enabled}}'
+			check "93-podman: default network has $EXPECT_PODMAN_IPV6_SUBNET" \
+				network_has_subnet podman "$EXPECT_PODMAN_IPV6_SUBNET"
+		else
+			skip "93-podman: default network IPv6 (not configured)"
+		fi
 	else
 		skip "93-podman (disabled)"
 	fi

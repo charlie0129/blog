@@ -416,6 +416,85 @@ done
 
 `fstrim -a` walks every mounted filesystem and de-duplicates devices, but that is util-linux's `fstrim`. Busybox's applet takes exactly one mount point and has no `-a` at all, so on the image as built the `-a` form fails and the loop does the work. My original `fstrim -a || fstrim /` looked like it handled that and did not: the fallback trimmed only the root, which is precisely the filesystem that needed it least.
 
+### IPv6 For Containers
+
+`93-podman` has two IPv6 knobs, both off by default. What they do is smaller than it sounds, and the reason is worth writing down, because the failure they prevent is a confusing one: an instance with a working public IPv6 address, a security group that allows the port, and `-p 80:80` on a container that answers over IPv4 and is simply not there over IPv6.
+
+Netavark decides port forwarding per address family, from the addresses the container actually has. An IPv4-only network means no `ip6` DNAT rules — `nft list tables` has `table ip nat` and no `table ip6 nat` — and podman reserves the host port on `0.0.0.0` alone. There is nothing to connect to, and no error anywhere that says so. The container has no outbound IPv6 either.
+
+So the network has to be dual stack, and for any network you create yourself that is not something an image can decide: the address family is chosen per network, at create time.
+
+```sh
+podman network create --subnet 10.89.0.0/24 --subnet fd42:10:89::/64 services
+```
+
+A ULA and NAT66, not a real prefix, because providers hand the instance one address and delegate nothing — Aliyun's ENI gets a single DHCPv6 `/128`, which cannot be split. Netavark masquerades it outbound and DNATs published ports inbound, so the client address is still preserved on the way in. NAT66 is unfashionable; it is also what is on offer.
+
+What the image *can* do is make the kernel willing to route for such a bridge, which is `PODMAN_IPV6=yes` and one sysctl:
+
+```sh
+net.ipv6.conf.all.forwarding = 1
+```
+
+And that line is where the interesting part is. Enabling forwarding makes the kernel stop honouring router advertisements — reasonably, since a router is not supposed to take its own configuration from its neighbours. On an image that gets its address and default route from RAs, which is `IPV6=slaac`, the next boot comes up with neither. `accept_ra=2` is the value that means "router that still accepts RAs":
+
+```sh
+net.ipv6.conf.eth0.accept_ra = 2
+net.ipv6.conf.default.accept_ra = 2
+```
+
+Per interface, and my first attempt wrote `conf/all/accept_ra` instead, which is wrong in a way that is invisible unless something checks: unlike `forwarding`, a write to `all` is not propagated to interfaces that already exist, and `default` only seeds interfaces created later. `eth0` is created by its driver before the `sysctl` service runs, so both land somewhere harmless and the interface stays at 1. The image boots, `sysctl -a` shows `all.accept_ra = 2`, and the machine has quietly stopped configuring itself from RAs. `99-selftest` caught it on the first boot precisely because it reads the value off the interface rather than trusting the file — the check and the bug went in on the same afternoon.
+
+The hook writes those two only when `IPV6=slaac`, and this is not tidiness. With `IPV6=dhcp` the address comes from dhcpcd, which processes RAs in userspace and leaves `accept_ra` at 0; raising it there would have the kernel configure a second address and a second default route alongside dhcpcd's. The correct value depends on who is listening, so the hook branches on the variable `10-network` already used.
+
+Ordering is free here: Alpine's `sysctl` service declares `before bootmisc` and `networking` declares `after bootmisc`, so whatever is in `/etc/sysctl.d` is applied before the interface comes up.
+
+`99-selftest` checks forwarding is on and — the one that would actually catch the `accept_ra` trap — that the interface's `accept_ra` is not left at 1 while the machine forwards. That is checked as configuration rather than by looking for a live default route, because a network with no IPv6 at all would not have one either, and a false FAIL in the boot report is worse than no check.
+
+#### The Default Network
+
+`PODMAN_IPV6_SUBNET` is the second knob: give it a ULA and the *default* `podman` network becomes dual stack too, so a bare `podman run -p 80:80` behaves like the named-network case above. This is narrower than it sounds — compose projects create their own networks and are unaffected — but it is the case where there is no create command to pass flags to.
+
+It has to be a file, and the reason is the interesting part. The obvious approach does not work:
+
+```console
+# podman network create --subnet 10.88.0.0/16 --ipv6 --subnet fd42:88::/64 podman
+Error: network name podman already used: network already exists
+```
+
+The name is always taken, because the default network is not stored anywhere: podman synthesises it from `containers.conf` on demand. A machine that has created other networks has only those on disk — `/etc/containers/networks/` holds a `services.json` and no `podman.json`. And the `containers.conf` side is no help either: there is a `default_subnet` for the v4 half with no v6 counterpart, and `default_subnet_pools` is documented as "only used for ipv4 subnets, ipv6 subnets are always assigned randomly".
+
+So the hook writes the file podman would have synthesised:
+
+```json
+{
+  "name": "podman",
+  "id": "2f259bab93aaaaa2542ba43ef33eb990d0999ee1b9924b557b7be53c0b7a1bb9",
+  "driver": "bridge",
+  "network_interface": "podman0",
+  "subnets": [
+    { "subnet": "10.88.0.0/16", "gateway": "10.88.0.1" },
+    { "subnet": "fd42:88::/64", "gateway": "fd42:88::1" }
+  ],
+  "ipv6_enabled": true,
+  "internal": false,
+  "dns_enabled": true,
+  "ipam_options": { "driver": "host-local" }
+}
+```
+
+That `id` is not decoration, and leaving it out is the failure worth knowing about. A config podman cannot parse is *skipped*:
+
+```console
+level=warning msg="Network config \"...podman.json\" could not be parsed, skipping: invalid network ID \"\""
+```
+
+One warning line, exit status 0, and the synthesised IPv4-only network still in place — which is to say the knob would appear to work and do nothing. The value above is not arbitrary either: it is `sha256("podman")`, which is how podman derives the default network's own id, so the hook generates it with `printf podman | sha256sum` and the file is byte-identical in effect to what podman had in memory.
+
+I was wrong about this in an earlier draft of this section, which recommended a `network create` at provisioning time as the same work without the coupling. It is not the same work; it is refused. The coupling to netavark's on-disk schema is real and the honest mitigation is not avoidance but detection: `99-selftest` asks *podman* whether the default network is dual stack and carries the expected prefix, so a schema change under an upgrade shows up as a FAIL rather than as a warning nobody reads.
+
+Two things none of this does, both of which look like the same bug from a browser. The security group needs IPv6 rules: on Aliyun a rule's v4 and v6 sources are separate fields, so `0.0.0.0/0` on port 443 does not imply `::/0`. And the name has to have an `AAAA` record.
+
 ### Writing Your Own
 
 Drop a script in `hooks/`, add its name to `HOOKS`. The whole `hooks/` directory is copied into the chroot at `/tmp/mkalpine`, so a hook that needs to install a longer file can keep it in `hooks/files/` and copy it from `/tmp/mkalpine/files/` rather than embedding it in a heredoc:

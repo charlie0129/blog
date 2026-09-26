@@ -78,3 +78,89 @@ EOF
 
 chmod +x /etc/init.d/docker-sock
 rc-update add docker-sock default >/dev/null
+
+# IPv6 for containers, if asked for.
+#
+# There is no knob that makes every podman network dual stack: containers.conf
+# has no such default, so the address family is chosen per network, at create
+# time. What the image can do is make the kernel willing to route for one --
+# netavark will masquerade a ULA (NAT66) but cannot forward while this is 0, and
+# without a v6 address on the container there is no ip6 DNAT either, so a
+# published port stays IPv4-only no matter what the provider allows in.
+#
+# A ULA rather than a real prefix because providers hand a single address to the
+# instance and delegate nothing: Aliyun's ENI gets one DHCPv6 /128, which cannot
+# be split. NAT66 is unfashionable and it is what is available.
+if [ "$PODMAN_IPV6" = yes ]; then
+	IFACE=${NETWORK_INTERFACE:-eth0}
+	{
+		echo '# Netavark cannot route for a dual-stack bridge without this.'
+		echo 'net.ipv6.conf.all.forwarding = 1'
+
+		# Forwarding makes the kernel stop honouring router advertisements, so
+		# an image that learns its own address and default route from RAs comes
+		# up with neither. accept_ra=2 is the "router that still accepts RAs"
+		# value, and it is set only where the kernel is the one listening:
+		# dhcpcd processes RAs in userspace with accept_ra=0, and raising it
+		# there would configure a second address and route alongside dhcpcd's.
+		#
+		# Per interface, and this matters: unlike forwarding, a write to
+		# conf/all/accept_ra is not propagated to interfaces that already
+		# exist, and conf/default only seeds ones created later. eth0 is
+		# created by its driver before the sysctl service runs, so all/default
+		# alone leave it at 1 -- which is to say they look applied and change
+		# nothing. 99-selftest reads the value off the interface for exactly
+		# this reason.
+		if [ "$IPV6" = slaac ]; then
+			echo
+			echo '# SLAAC still has to work on a host that forwards.'
+			echo "net.ipv6.conf.$IFACE.accept_ra = 2"
+			echo 'net.ipv6.conf.default.accept_ra = 2'
+		fi
+	} >/etc/sysctl.d/03-podman-ipv6.conf
+fi
+
+# The default network, if a prefix was given for it.
+#
+# This has to be a file. podman synthesises the "podman" network from
+# containers.conf rather than storing it -- a fresh machine has no
+# /etc/containers/networks/podman.json at all -- and because the name is
+# therefore always taken, the obvious approach fails:
+#
+#   # podman network create --subnet 10.88.0.0/16 --ipv6 --subnet fd42:88::/64 podman
+#   Error: network name podman already used: network already exists
+#
+# containers.conf has default_subnet for the v4 side and no v6 counterpart, and
+# default_subnet_pools is documented as "only used for ipv4 subnets, ipv6
+# subnets are always assigned randomly". So writing the file podman would
+# otherwise have generated is the whole of the supported surface here.
+#
+# This affects `podman run` without --network. Compose projects create their own
+# networks and need their own IPv6 configuration; nothing in an image can decide
+# that for them.
+if [ -n "$PODMAN_IPV6_SUBNET" ]; then
+	mkdir -p /etc/containers/networks
+	# The id is not decoration: a config without one is rejected with "invalid
+	# network ID" and *skipped*, which leaves the synthesised IPv4-only network
+	# in place behind a single warning line. podman derives the default
+	# network's id as sha256 of its name, so this reproduces its own value.
+	#
+	# 10.88.0.0/16 is podman's own default_subnet. Change both together if you
+	# change that.
+	cat >/etc/containers/networks/podman.json <<EOF
+{
+     "name": "podman",
+     "id": "$(printf podman | sha256sum | cut -d' ' -f1)",
+     "driver": "bridge",
+     "network_interface": "podman0",
+     "subnets": [
+          { "subnet": "10.88.0.0/16", "gateway": "10.88.0.1" },
+          { "subnet": "$PODMAN_IPV6_SUBNET", "gateway": "${PODMAN_IPV6_SUBNET%%/*}1" }
+     ],
+     "ipv6_enabled": true,
+     "internal": false,
+     "dns_enabled": true,
+     "ipam_options": { "driver": "host-local" }
+}
+EOF
+fi

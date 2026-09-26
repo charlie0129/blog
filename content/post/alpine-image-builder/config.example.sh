@@ -345,7 +345,8 @@ HOOKS="10-network 20-ssh 30-chrony 40-zram 50-logtruncate 60-sysctl 70-growroot 
 #   90-tools       bash, coreutils, iproute2, tcpdump, htop, ... (~120M)
 #   91-ufw         ufw with a deny-incoming ruleset
 #   92-sshguard    sshguard + nftables, without enabling the nftables service
-#   93-podman      podman, cgroups v2, docker-cli against podman's socket
+#   93-podman      podman, cgroups v2, docker-cli against podman's socket,
+#                  optional IPv6 (PODMAN_IPV6, PODMAN_IPV6_SUBNET)
 #   94-cloud-init  cloud-init (pulls in Python, ~150M)
 #   95-dotfiles    git, zsh, lsd and a dotfiles repo; zsh becomes root's login
 #                  shell (~67M of files, 21M of it on compressed btrfs)
@@ -400,6 +401,23 @@ UFW_ALLOW=""
 
 # 90-tools: appended to the package list that hook installs.
 EXTRA_TOOLS=""
+
+# 93-podman: let containers use IPv6.  Writes the sysctls a dual-stack podman
+# bridge needs -- forwarding, plus accept_ra=2 when IPV6=slaac so the host does
+# not lose its own address and default route by becoming a router.
+PODMAN_IPV6=no
+
+# 93-podman: also make the *default* podman network dual stack, with this ULA.
+# Empty leaves it alone.  Needs PODMAN_IPV6=yes, and must be written out to its
+# own :: -- the gateway is that prefix with a 1 appended.
+#
+# This only covers `podman run` without --network.  Compose projects create
+# their own networks, and no containers.conf setting makes every network dual
+# stack, so anything else gets its address family at create time:
+#
+#   podman network create --subnet 10.89.0.0/24 --subnet fd42:10:89::/64 mynet
+#
+PODMAN_IPV6_SUBNET=""
 
 # 95-dotfiles: whose dotfiles, and where they go.  The default is my own repo;
 # the hook clones it (shallow), runs its bootstrap.sh, and only touches root.
