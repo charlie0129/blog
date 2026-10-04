@@ -366,6 +366,26 @@ sed -i 's/.*SystemMaxUse.*/SystemMaxUse=128M/g' /etc/systemd/journald.conf
 systemctl restart systemd-journald
 ```
 
+## Reduce Idle VM CPU: Disable the USB Tablet
+
+Proxmox adds a USB tablet device to every VM by default (`tablet: 1`). It exists so the mouse tracks 1:1 in the noVNC console without guest drivers. The hidden cost: the tablet sits on an emulated UHCI (USB 1.1) controller, and once a Linux or BSD guest's `uhci_hcd` driver starts that controller, QEMU emulates the 1 ms UHCI frame schedule in its main event loop. That is ~1800 wakeups/s and roughly 4-5% of a host core per VM, forever, even when the guest is completely idle.
+
+It is easy to miss because the burn is invisible inside the guest: the time is spent in QEMU's main-loop thread, not the vCPU thread, so the guest sees itself as idle while `top` on the host shows the `kvm` process at 5%. Windows guests are unaffected because they suspend unused USB devices.
+
+To confirm a VM is paying this tax, compare the per-thread CPU time of the QEMU process — the main thread (TID = PID) is hot while `CPU 0/KVM` is idle — or watch the ~0.9 ms poll timeouts:
+
+```bash
+strace -p "$(cat /var/run/qemu-server/<vmid>.pid)" -e trace=ppoll
+```
+
+For headless VMs that only ever use a serial console, the tablet is useless. Disable it:
+
+```bash
+qm set <vmid> -tablet 0
+```
+
+This hot-unplugs the device live (no restart needed) and persists in the VM config. Keep it enabled on VMs where you actually use the noVNC console mouse, such as Windows guests — which, conveniently, are also the ones that do not pay for it.
+
 ## Configure BBR
 
 Use BBR with `fq`.

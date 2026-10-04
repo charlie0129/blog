@@ -379,7 +379,7 @@ A few implementation notes:
 
 **`20-ssh` rewrites existing lines rather than appending.** `sshd_config` takes the *first* occurrence of a keyword, so appending `PermitRootLogin prohibit-password` to a file that already contains a commented-out default works, and appending it to one that has an active setting silently does nothing. The hook edits in place.
 
-**`50-logtruncate` truncates rather than renames.** Keeping one `.0` copy and then `truncate -s 0` on the original preserves the inode, so daemons holding the file open keep writing to it. This is the script from the old post, unchanged.
+**`50-logtruncate` truncates rather than renames.** Keeping one `.0` copy and then `truncate -s 0` on the original preserves the inode, so daemons holding the file open keep writing to it. This is the script from the old post, with one change: it prunes `/var/log/pods`, because kubelet rotates container logs itself and truncating them underneath it loses lines and confuses its rotated-file accounting.
 
 **`70-growroot` uses `growpart`, not `sfdisk`.** Growing a GPT disk also requires relocating the backup header to the new end of the device, and `growpart` keeps the partition's *start* sector untouched, so whatever alignment the image was built with survives. After that it is `btrfs filesystem resize max /`, `resize2fs` or `xfs_growfs` depending on `ROOT_FS`, then a stamp file and `rc-update del growroot default`.
 

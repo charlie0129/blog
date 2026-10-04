@@ -6,6 +6,9 @@ tailscale up
 tailscale set --accept-dns=false
 # If you want to use a custom relay server, you can set the port like this:
 tailscale set --relay-server-port=xxx
+# DO NOT set --port= same as relay port, it will break the relay server.
+tailscale set --relay-server-static-endpoints="<ip-address-1>:<port>,<ip-address-2>:<port>"
+
 
 # Netavark incompatibility
 # Some native Tailscale expressions cannot be translated by that frontend. Listing the tables fails:

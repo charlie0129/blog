@@ -12,11 +12,16 @@ cat >/etc/periodic/hourly/logtruncate <<'EOF'
 
 # Rotate log files larger than 4M.
 # Keep one .0 backup and truncate the original in place.
+#
+# /var/log/pods is skipped: kubelet rotates container logs itself (rename +
+# CRI reopen, 10Mi by default) and tracks rotated files with a glob on
+# "0.log.*", so truncating there loses lines and confuses its accounting.
+# Tune container-log-max-size / container-log-max-files on the kubelet instead.
 
 LOG_DIR="/var/log"
 MAX_SIZE=$((4 * 1024 * 1024))  # 4M in bytes
 
-find "$LOG_DIR" -type f ! -name '*.0' | while read -r file; do
+find "$LOG_DIR" -path "$LOG_DIR/pods" -prune -o -type f ! -name '*.0' -print | while read -r file; do
     # Works with both GNU and BusyBox stat.
     size=$(stat -c %s "$file" 2>/dev/null || stat -f %z "$file" 2>/dev/null || echo 0)
 
