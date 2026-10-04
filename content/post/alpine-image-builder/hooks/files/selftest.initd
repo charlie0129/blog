@@ -121,6 +121,13 @@ created_after_build() {
 any_host_key() { ls /etc/ssh/ssh_host_*_key >/dev/null 2>&1; }
 
 zram_swap_active() { grep -q '^/dev/zram' /proc/swaps; }
+
+# A controller is usable by services only once it is in the root
+# subtree_control; being listed in cgroup.controllers is not enough.
+controller_delegated() {
+	tr ' ' '\n' </sys/fs/cgroup/cgroup.subtree_control | grep -qx "$1"
+}
+mounted_fstype() { awk -v t="$1" '$3 == t { found = 1 } END { exit !found }' /proc/mounts; }
 tmp_on_zram() { mount_field /tmp 1 | grep -q zram; }
 
 # login_shell_is <user> <shell> -- <shell> is a name or an absolute path, the
@@ -353,6 +360,37 @@ start() {
 		fi
 	else
 		skip "60-sysctl (disabled)"
+	fi
+
+	if hook_enabled 65-cgroups; then
+		check "65-cgroups: rc_cgroup_mode is $EXPECT_CGROUP_MODE" \
+			grep -qx "rc_cgroup_mode=\"$EXPECT_CGROUP_MODE\"" /etc/rc.conf
+		check "65-cgroups: cgroups service enabled" in_runlevel cgroups
+		check "65-cgroups: cgroups service started" svc_started cgroups
+		case "$EXPECT_CGROUP_MODE" in
+		unified)
+			info "cgroup controllers=$(cat /sys/fs/cgroup/cgroup.controllers 2>/dev/null)"
+			check "65-cgroups: /sys/fs/cgroup is cgroup2" \
+				fstype_is /sys/fs/cgroup cgroup2
+			check "65-cgroups: no cgroup v1 hierarchy mounted" \
+				not mounted_fstype cgroup
+			# The ones kubelet and containerd actually use.
+			for c in cpu cpuset memory pids io; do
+				check "65-cgroups: $c controller delegated" controller_delegated "$c"
+			done
+			;;
+		hybrid)
+			check "65-cgroups: /sys/fs/cgroup is tmpfs" fstype_is /sys/fs/cgroup tmpfs
+			check "65-cgroups: /sys/fs/cgroup/unified is cgroup2" \
+				fstype_is /sys/fs/cgroup/unified cgroup2
+			;;
+		legacy)
+			check "65-cgroups: /sys/fs/cgroup is tmpfs" fstype_is /sys/fs/cgroup tmpfs
+			check "65-cgroups: no cgroup2 mounted" not mounted_fstype cgroup2
+			;;
+		esac
+	else
+		skip "65-cgroups (disabled)"
 	fi
 
 	if hook_enabled 70-growroot; then

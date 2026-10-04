@@ -13,8 +13,9 @@ apk add --quiet --no-progress podman
 # Cap container logs at 1M so a chatty container cannot fill the disk.
 sed -i 's/^#\?log_size_max =.*/log_size_max = 1048576/' /etc/containers/containers.conf
 
-# cgroups v2, for compatibility with modern container runtimes.
-rc-update add cgroups default >/dev/null
+# cgroups v2. 65-cgroups does this in the default HOOKS list; this is for an
+# image built without it. rc-update exits 0 when the service is already there.
+rc-update add cgroups boot >/dev/null
 
 # Starts containers whose restart policy is always or unless-stopped.
 rc-update add podman default >/dev/null

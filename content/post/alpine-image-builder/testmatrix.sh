@@ -88,7 +88,7 @@ run() {
 
 # Every image gets the selftest hook, and a key so the ssh checks have
 # something to verify. The key is a placeholder: it is never used to log in.
-BASE_HOOKS="10-network 20-ssh 30-chrony 40-zram 50-logtruncate 60-sysctl 70-growroot 80-firstboot"
+BASE_HOOKS="10-network 20-ssh 30-chrony 40-zram 50-logtruncate 60-sysctl 65-cgroups 70-growroot 80-firstboot"
 export HOOKS="$BASE_HOOKS 99-selftest"
 export SSH_AUTHORIZED_KEYS="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyDoNotUse matrix@testmatrix"
 

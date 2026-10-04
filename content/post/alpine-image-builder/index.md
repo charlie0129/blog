@@ -357,7 +357,7 @@ The single most valuable property of a cloud image is that you can get into it w
 One ordered list, in `HOOKS`. Remove a name to disable it; drop a file into `hooks/` and add its name to extend. Each hook is a standalone `sh` script run inside the chroot with the configuration exported into its environment.
 
 ```sh
-HOOKS="10-network 20-ssh 30-chrony 40-zram 50-logtruncate 60-sysctl 70-growroot 80-firstboot"
+HOOKS="10-network 20-ssh 30-chrony 40-zram 50-logtruncate 60-sysctl 65-cgroups 70-growroot 80-firstboot"
 ```
 
 | Hook | Does |
@@ -368,6 +368,7 @@ HOOKS="10-network 20-ssh 30-chrony 40-zram 50-logtruncate 60-sysctl 70-growroot 
 | `40-zram` | zram swap sized from RAM at boot, optionally `/tmp` too |
 | `50-logtruncate` | the hourly log cap from the old post, plus a daily apk cache clean |
 | `60-sysctl` | zram VM tunables, BBR and fq |
+| `65-cgroups` | one cgroup v2 tree on `/sys/fs/cgroup`, mounted at boot |
 | `70-growroot` | one-shot service: `growpart`, then grow the filesystem |
 | `80-firstboot` | machine-id and SSH host key generation |
 
@@ -380,6 +381,8 @@ A few implementation notes:
 **`20-ssh` rewrites existing lines rather than appending.** `sshd_config` takes the *first* occurrence of a keyword, so appending `PermitRootLogin prohibit-password` to a file that already contains a commented-out default works, and appending it to one that has an active setting silently does nothing. The hook edits in place.
 
 **`50-logtruncate` truncates rather than renames.** Keeping one `.0` copy and then `truncate -s 0` on the original preserves the inode, so daemons holding the file open keep writing to it. This is the script from the old post, with one change: it prunes `/var/log/pods`, because kubelet rotates container logs itself and truncating them underneath it loses lines and confuses its rotated-file accounting.
+
+**`65-cgroups` exists because a stock Alpine mounts no cgroups at all.** The `cgroups` service is installed but in no runlevel, so `/sys/fs/cgroup` is an empty directory until something like k3s or podman mounts its own idea of the right layout. The hook sets `rc_cgroup_mode="unified"` in `/etc/rc.conf` and adds the service to the `boot` runlevel, so everything in `default` starts with one cgroup v2 hierarchy already there and every controller enabled. OpenRC has defaulted to unified since 0.51, so the setting is belt and braces on a current branch; it is there so the result does not depend on which OpenRC a branch ships, and so `CGROUP_MODE=hybrid` or `legacy` is a one-line change for software that still needs v1. This is the whole of the Alpine-specific preparation the k3s docs ask for. The one Kubernetes blocker it does not remove is swap: kubelet refuses to start while swap is on, and `40-zram` turns it on, so k3s needs `INSTALL_K3S_EXEC="--kubelet-arg=fail-swap-on=false"` or an image built without that hook.
 
 **`70-growroot` uses `growpart`, not `sfdisk`.** Growing a GPT disk also requires relocating the backup header to the new end of the device, and `growpart` keeps the partition's *start* sector untouched, so whatever alignment the image was built with survives. After that it is `btrfs filesystem resize max /`, `resize2fs` or `xfs_growfs` depending on `ROOT_FS`, then a stamp file and `rc-update del growroot default`.
 
@@ -564,6 +567,8 @@ The hook installs a service that runs last in the `default` runlevel and checks 
   ok   20-ssh: listening on 22
   ok   40-zram: swap is ~100% of RAM
   ok   60-sysctl: congestion control is bbr
+  ok   65-cgroups: /sys/fs/cgroup is cgroup2
+  ok   65-cgroups: memory controller delegated
   ok   70-growroot: removed itself from the default runlevel
   ok   70-growroot: root fs fills the partition
   ok   80-firstboot: host key is not the build host's

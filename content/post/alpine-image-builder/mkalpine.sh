@@ -186,7 +186,7 @@ fi
 : "${PACKAGES:=}"
 : "${HOOKS_DIR:=$SCRIPT_DIR/hooks}"
 : "${OVERLAY_DIR:=$SCRIPT_DIR/overlay}"
-: "${HOOKS:=10-network 20-ssh 30-chrony 40-zram 50-logtruncate 60-sysctl 70-growroot 80-firstboot}"
+: "${HOOKS:=10-network 20-ssh 30-chrony 40-zram 50-logtruncate 60-sysctl 65-cgroups 70-growroot 80-firstboot}"
 
 : "${OUTPUT_FORMATS:=raw}"
 : "${WORK_DIR:=}"
@@ -201,6 +201,7 @@ fi
 : "${ZRAM_SWAP_RATIO:=100}"
 : "${ZRAM_TMP:=yes}"
 : "${ENABLE_BBR:=yes}"
+: "${CGROUP_MODE:=unified}"
 : "${UFW_ALLOW:=}"
 : "${EXTRA_TOOLS:=}"
 : "${PODMAN_IPV6:=no}"
@@ -1084,7 +1085,7 @@ if [ -n "$HOOKS" ]; then
 		BTRFS_SUBVOL IMAGE_HOSTNAME TIMEZONE SSH_AUTHORIZED_KEYS \
 		SSH_PERMIT_ROOT_LOGIN SSH_PORT NETWORK NETWORK_INTERFACE IPV6 \
 		IP_ADDRESS GATEWAY DNS NTP_POOL ZRAM_ALGO ZRAM_SWAP_RATIO \
-		ZRAM_TMP ENABLE_BBR UFW_ALLOW EXTRA_TOOLS PODMAN_IPV6 \
+		ZRAM_TMP ENABLE_BBR CGROUP_MODE UFW_ALLOW EXTRA_TOOLS PODMAN_IPV6 \
 		PODMAN_IPV6_SUBNET \
 		DOTFILES_REPO DOTFILES_DIR DOTFILES_SHELL DOTFILES_Z4H; do
 		eval "value=\$$var"

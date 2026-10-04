@@ -1,0 +1,37 @@
+#!/bin/sh
+# 65-cgroups - one cgroup v2 hierarchy on /sys/fs/cgroup, mounted at boot.
+#
+# A fresh Alpine mounts no cgroups at all: the cgroups service is installed but
+# sits in no runlevel. Anything that manages processes by cgroup -- k3s,
+# kubelet, containerd, podman -- then either refuses to start or mounts its own
+# idea of the right layout, which is how an image ends up with a hybrid tree
+# nobody asked for.
+#
+# OpenRC has defaulted rc_cgroup_mode to "unified" since 0.51, so on a current
+# branch the mode is already right and only the service is missing. It is set
+# explicitly anyway: the image should not depend on which OpenRC a branch ships,
+# and hybrid or legacy become a one-line change for the rare thing that still
+# wants cgroup v1. In unified mode OpenRC enables every controller the kernel
+# offers in the root cgroup.subtree_control, which is what kubelet looks for.
+set -eu
+
+case "$CGROUP_MODE" in
+unified | hybrid | legacy) ;;
+*)
+	echo "65-cgroups: CGROUP_MODE must be unified, hybrid or legacy, not '$CGROUP_MODE'" >&2
+	exit 1
+	;;
+esac
+
+# rc.conf ships the setting as a commented-out example. Rewrite that line,
+# active or not, rather than appending a second assignment: the later one would
+# win and the file would say two things.
+if grep -qE '^#?rc_cgroup_mode=' /etc/rc.conf; then
+	sed -i -E "s|^#?rc_cgroup_mode=.*|rc_cgroup_mode=\"$CGROUP_MODE\"|" /etc/rc.conf
+else
+	printf '\nrc_cgroup_mode="%s"\n' "$CGROUP_MODE" >>/etc/rc.conf
+fi
+
+# boot rather than default, so that every service in default starts with the
+# hierarchy already mounted and is placed in its own cgroup by openrc-run.
+rc-update add cgroups boot >/dev/null

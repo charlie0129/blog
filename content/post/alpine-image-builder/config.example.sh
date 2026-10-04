@@ -337,7 +337,7 @@ PACKAGES=""
 # hook is therefore already a session leader and should not call setsid itself --
 # busybox's applet forks when its caller is one, which turns a synchronous
 # command into a background job whose exit status is lost.
-HOOKS="10-network 20-ssh 30-chrony 40-zram 50-logtruncate 60-sysctl 70-growroot 80-firstboot"
+HOOKS="10-network 20-ssh 30-chrony 40-zram 50-logtruncate 60-sysctl 65-cgroups 70-growroot 80-firstboot"
 
 # Also shipped, off by default because they are opinionated rather than
 # essential.  Append the ones you want:
@@ -345,7 +345,7 @@ HOOKS="10-network 20-ssh 30-chrony 40-zram 50-logtruncate 60-sysctl 70-growroot 
 #   90-tools       bash, coreutils, iproute2, tcpdump, htop, ... (~120M)
 #   91-ufw         ufw with a deny-incoming ruleset
 #   92-sshguard    sshguard + nftables, without enabling the nftables service
-#   93-podman      podman, cgroups v2, docker-cli against podman's socket,
+#   93-podman      podman, docker-cli against podman's socket,
 #                  optional IPv6 (PODMAN_IPV6, PODMAN_IPV6_SUBNET)
 #   94-cloud-init  cloud-init (pulls in Python, ~150M)
 #   95-dotfiles    git, zsh, lsd and a dotfiles repo; zsh becomes root's login
@@ -392,6 +392,21 @@ ZRAM_SWAP_RATIO=100
 ZRAM_TMP=yes      # put /tmp on zram instead of tmpfs
 
 ENABLE_BBR=yes
+
+# 65-cgroups: how OpenRC mounts cgroups.  "unified" is one cgroup v2 tree on
+# /sys/fs/cgroup with every controller enabled, which is what k3s, kubelet,
+# containerd and podman expect -- a stock Alpine has the service installed but
+# enabled in no runlevel, so nothing is mounted at all.  "hybrid" (v1 on
+# /sys/fs/cgroup, v2 on /sys/fs/cgroup/unified) and "legacy" (v1 only) exist
+# for software that still needs cgroup v1.
+#
+# One thing this does not fix for Kubernetes: kubelet refuses to start while
+# swap is on, and 40-zram turns it on.  Either install k3s with
+#
+#   INSTALL_K3S_EXEC="--kubelet-arg=fail-swap-on=false"
+#
+# or drop 40-zram from HOOKS (then also drop the zram sysctls in 60-sysctl).
+CGROUP_MODE=unified
 
 # 91-ufw: extra allow rules, one per line, in ufw syntax.
 # UFW_ALLOW="80/tcp
