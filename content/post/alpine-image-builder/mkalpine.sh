@@ -115,6 +115,9 @@ fi
 : "${ALPINE_VERSION:=}"
 : "${ARCH:=$(uname -m)}"
 : "${KERNEL_FLAVOR:=virt}"
+# A local apk repository to take the kernel from instead of the Alpine mirror:
+# what build-kernel.sh writes.  Empty means the stock kernel.
+: "${KERNEL_REPO_DIR:=}"
 
 # Proxy for the build's own downloads: the minirootfs tarball on the host, and
 # apk plus anything a hook fetches inside the chroot.  Inherited from the
@@ -205,6 +208,9 @@ fi
 : "${VMMEM_REPORTING_ORDER:=2}"
 : "${VMMEM_THP:=madvise}"
 : "${VMMEM_CACHE_KEEP:=256}"
+: "${VMMEM_DAMON_RECLAIM:=no}"
+: "${VMMEM_DAMON_MIN_AGE:=120}"
+: "${VMMEM_DAMON_QUOTA_MS:=10}"
 : "${UFW_ALLOW:=}"
 : "${EXTRA_TOOLS:=}"
 : "${PODMAN_IPV6:=no}"
@@ -263,6 +269,38 @@ case "$PODMAN_IPV6" in yes | no) ;; *) die "PODMAN_IPV6 must be yes or no" ;; es
 case "$VMMEM_REPORTING_ORDER" in '' | [0-9]) ;; *) die "VMMEM_REPORTING_ORDER must be empty or a single digit 0-9" ;; esac
 case "$VMMEM_THP" in '' | always | madvise | never) ;; *) die "VMMEM_THP must be empty, always, madvise or never" ;; esac
 case "$VMMEM_CACHE_KEEP" in '' | *[!0-9]*) die "VMMEM_CACHE_KEEP must be a number of MiB (0 disables the trim)" ;; esac
+case "$VMMEM_DAMON_RECLAIM" in yes | no) ;; *) die "VMMEM_DAMON_RECLAIM must be yes or no" ;; esac
+case "$VMMEM_DAMON_MIN_AGE" in '' | 0 | *[!0-9]*) die "VMMEM_DAMON_MIN_AGE must be a number of seconds" ;; esac
+case "$VMMEM_DAMON_QUOTA_MS" in '' | 0 | *[!0-9]*) die "VMMEM_DAMON_QUOTA_MS must be a number of milliseconds per second" ;; esac
+
+# The custom kernel repository: a signed APKINDEX for this architecture, the
+# public key it was signed with, and exactly one package for the flavour.  The
+# version is read off the file name and becomes an exact pin in the image's
+# /etc/apk/world, which is what keeps "apk upgrade" from putting the stock
+# kernel back.
+KERNEL_PKG=linux-$KERNEL_FLAVOR
+KERNEL_REPO_KEY=
+if [ -n "$KERNEL_REPO_DIR" ]; then
+	KERNEL_REPO_DIR=$(CDPATH='' cd -- "$KERNEL_REPO_DIR" 2>/dev/null && pwd) ||
+		die "KERNEL_REPO_DIR does not exist: $KERNEL_REPO_DIR"
+	[ -s "$KERNEL_REPO_DIR/$ARCH/APKINDEX.tar.gz" ] ||
+		die "KERNEL_REPO_DIR has no $ARCH/APKINDEX.tar.gz; build-kernel.sh writes one"
+	for f in "$KERNEL_REPO_DIR"/*.rsa.pub; do
+		[ -f "$f" ] || continue
+		[ -z "$KERNEL_REPO_KEY" ] || die "KERNEL_REPO_DIR has more than one *.rsa.pub; apk needs to know which one signed the index"
+		KERNEL_REPO_KEY=$f
+	done
+	[ -n "$KERNEL_REPO_KEY" ] || die "KERNEL_REPO_DIR has no *.rsa.pub next to $ARCH/"
+	KERNEL_PKG_VERSION=
+	for f in "$KERNEL_REPO_DIR/$ARCH/linux-$KERNEL_FLAVOR"-[0-9]*.apk; do
+		[ -f "$f" ] || continue
+		[ -z "$KERNEL_PKG_VERSION" ] || die "KERNEL_REPO_DIR has more than one linux-$KERNEL_FLAVOR package; keep one version per repository"
+		KERNEL_PKG_VERSION=${f##*/linux-"$KERNEL_FLAVOR"-}
+		KERNEL_PKG_VERSION=${KERNEL_PKG_VERSION%.apk}
+	done
+	[ -n "$KERNEL_PKG_VERSION" ] || die "KERNEL_REPO_DIR/$ARCH has no linux-$KERNEL_FLAVOR-*.apk (is KERNEL_FLAVOR the flavour it was built for?)"
+	KERNEL_PKG="linux-$KERNEL_FLAVOR=$KERNEL_PKG_VERSION"
+fi
 
 # A dual-stack network on a host that will not forward IPv6 is a network whose
 # containers have an address and no route.
@@ -808,14 +846,46 @@ GRUB_PKGS="grub"
 [ "$NEED_UEFI" = yes ] && GRUB_PKGS="$GRUB_PKGS grub-efi"
 [ "$NEED_BIOS" = yes ] && GRUB_PKGS="$GRUB_PKGS grub-bios"
 
+# The custom kernel repository is copied into the image under /tmp for the
+# duration of the install and listed first, so apk sees both it and the mirror
+# and the exact-version pin picks ours.  Only the key stays behind: with it,
+# "apk add /path/to/linux-virt-*.apk" from a later build-kernel.sh run is all
+# a kernel update on the running machine takes.
+if [ -n "$KERNEL_REPO_DIR" ]; then
+	mkdir -p "$MNT/tmp/mkalpine-kernel-repo" "$MNT/etc/apk/keys"
+	cp -a "$KERNEL_REPO_DIR/$ARCH" "$MNT/tmp/mkalpine-kernel-repo/"
+	cp "$KERNEL_REPO_KEY" "$MNT/etc/apk/keys/"
+	printf '/tmp/mkalpine-kernel-repo\n%s\n' "$(cat "$MNT/etc/apk/repositories")" \
+		>"$MNT/etc/apk/repositories"
+	info "kernel from $KERNEL_REPO_DIR, pinned as $KERNEL_PKG"
+fi
+
+# A kernel built from an older recipe may still depend on linux-firmware-any,
+# and apk 3 answers an unpinned virtual by installing every provider: a 512 MiB
+# image fills up with GPU firmware. Naming the empty provider settles it, and
+# costs nothing when the kernel has no such dependency.
+KERNEL_EXTRA_PKGS=
+[ -n "$KERNEL_REPO_DIR" ] && KERNEL_EXTRA_PKGS=linux-firmware-none
+
 in_chroot "apk update --quiet"
 in_chroot "apk add --quiet --no-progress \
 	alpine-base \
-	linux-$KERNEL_FLAVOR \
+	'$KERNEL_PKG' $KERNEL_EXTRA_PKGS \
 	mkinitfs \
 	ifupdown-ng \
 	$ROOT_FS_PKG $BOOT_FS_PKG $GRUB_PKGS $PACKAGES" ||
 	die "package installation failed"
+
+if [ -n "$KERNEL_REPO_DIR" ]; then
+	grep -qx "$KERNEL_PKG" "$MNT/etc/apk/world" ||
+		die "apk did not record the $KERNEL_PKG pin in /etc/apk/world"
+	sed -i '\|^/tmp/mkalpine-kernel-repo$|d' "$MNT/etc/apk/repositories"
+	rm -rf "$MNT/tmp/mkalpine-kernel-repo"
+	# The index of the removed repository would otherwise linger in the
+	# image's apk cache directory, if one exists, and confuse nobody but
+	# still not belong there.
+	in_chroot "apk update --quiet" || die "apk update after removing the kernel repository failed"
+fi
 
 step "Building initramfs"
 
@@ -1085,7 +1155,7 @@ if [ -n "$HOOKS" ]; then
 	# handed over as an environment file rather than inherited.
 	quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 	: >"$HOOK_TMP/env"
-	for var in ARCH ALPINE_VERSION ALPINE_BRANCH_DIR KERNEL_FLAVOR \
+	for var in ARCH ALPINE_VERSION ALPINE_BRANCH_DIR KERNEL_FLAVOR KERNEL_PKG \
 		HOOKS ROOT_FS ROOT_MOUNT_OPTS FSTAB_ROOT_OPTS BOOT_FS \
 		PARTITION_TABLE BOOT_MODE SERIAL_CONSOLE \
 		BTRFS_SUBVOL IMAGE_HOSTNAME TIMEZONE SSH_AUTHORIZED_KEYS \
@@ -1093,7 +1163,8 @@ if [ -n "$HOOKS" ]; then
 		IP_ADDRESS GATEWAY DNS NTP_POOL ZRAM_ALGO ZRAM_SWAP_RATIO \
 		ZRAM_TMP ENABLE_BBR CGROUP_MODE UFW_ALLOW EXTRA_TOOLS PODMAN_IPV6 \
 		PODMAN_IPV6_SUBNET \
-		VMMEM_REPORTING_ORDER VMMEM_THP VMMEM_CACHE_KEEP \
+		VMMEM_REPORTING_ORDER VMMEM_THP VMMEM_CACHE_KEEP VMMEM_DAMON_RECLAIM \
+		VMMEM_DAMON_MIN_AGE VMMEM_DAMON_QUOTA_MS \
 		DOTFILES_REPO DOTFILES_DIR DOTFILES_SHELL DOTFILES_Z4H; do
 		eval "value=\$$var"
 		# shellcheck disable=SC2154  # assigned by the eval above
@@ -1152,6 +1223,8 @@ cat >"$MNT/etc/image-release" <<-EOF
 	IMAGE_ALPINE_BRANCH=$ALPINE_BRANCH_DIR
 	IMAGE_ARCH=$ARCH
 	IMAGE_KERNEL_FLAVOR=$KERNEL_FLAVOR
+	IMAGE_KERNEL_PACKAGE=$KERNEL_PKG
+	IMAGE_KERNEL_RELEASE=$KVER
 	IMAGE_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 	IMAGE_BUILDER=mkalpine.sh
 	IMAGE_BUILDER_COMMIT=$BUILDER_COMMIT

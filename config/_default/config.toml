@@ -18,6 +18,10 @@ hasCJKLanguage = false
 # Image conversion takes time
 timeout = 600
 
+# The alpine-image-builder post is a page bundle whose directory is also the
+# tool: build artifacts land next to index.md and must not be published.
+ignoreFiles = ['alpine-image-builder/kernel-repo/', '\.img$', '\.img\.', '\.qcow2$', '\.raw$']
+
 [pagination]
 pagerSize = 5
 

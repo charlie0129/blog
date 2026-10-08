@@ -147,6 +147,17 @@ balloon_reporting() {
 	echo "no balloon device"
 }
 
+# A custom kernel is pinned as linux-<flavour>=<pkgver>-r<pkgrel> in world,
+# and its release string is <pkgver>-<pkgrel>-<flavour>: 6.18.55-r99 -> 6.18.55-99-virt.
+kernel_release_matches_pin() {
+	_ver=${1#*=}
+	[ "$(uname -r)" = "${_ver%-r*}-${_ver##*-r}-$2" ]
+}
+damon_reclaim_running() {
+	[ "$(cat /sys/module/damon_reclaim/parameters/enabled 2>/dev/null)" = Y ] &&
+		pgrep kdamond >/dev/null
+}
+
 mounted_fstype() { awk -v t="$1" '$3 == t { found = 1 } END { exit !found }' /proc/mounts; }
 tmp_on_zram() { mount_field /tmp 1 | grep -q zram; }
 
@@ -275,6 +286,21 @@ start() {
 	check "initramfs modules include $EXPECT_ROOT_FS" \
 		grep -qE "modules=[^ ]*$EXPECT_ROOT_FS" /proc/cmdline
 	check "cmdline is not quiet" not grep -qw quiet /proc/cmdline
+	case "$EXPECT_KERNEL_PKG" in
+	*=*)
+		check "kernel pinned in world as $EXPECT_KERNEL_PKG" \
+			grep -qx "$EXPECT_KERNEL_PKG" /etc/apk/world
+		check "running kernel is the pinned one" \
+			kernel_release_matches_pin "$EXPECT_KERNEL_PKG" "$EXPECT_KERNEL_FLAVOR"
+		check "kernel repository not left in /etc/apk/repositories" \
+			not grep -q mkalpine-kernel-repo /etc/apk/repositories
+		check "kernel signing key installed" \
+			sh -c 'ls /etc/apk/keys/mkalpine-*.rsa.pub >/dev/null 2>&1'
+		;;
+	*)
+		skip "custom kernel (stock $EXPECT_KERNEL_PKG)"
+		;;
+	esac
 	check "grub.cfg present" test -s /boot/grub/grub.cfg
 	if [ -n "$EXPECT_SERIAL" ]; then
 		tty=${EXPECT_SERIAL%%,*}
@@ -341,6 +367,10 @@ start() {
 		check "40-zram: swap is on zram" zram_swap_active
 		check "40-zram: swap is ~$EXPECT_ZRAM_RATIO% of RAM" \
 			zram_swap_sized_right
+		check "40-zram: vm.swappiness is 180" \
+			output_is 180 sysctl -n vm.swappiness
+		check "40-zram: vm.page-cluster is 0" \
+			output_is 0 sysctl -n vm.page-cluster
 		if [ "$EXPECT_ZRAM_TMP" = yes ]; then
 			check "40-zram: /tmp is on zram" tmp_on_zram
 			check "40-zram: no tmpfs /tmp left in fstab" \
@@ -366,10 +396,6 @@ start() {
 
 	if hook_enabled 60-sysctl; then
 		check "60-sysctl: sysctl service started" svc_started sysctl
-		check "60-sysctl: vm.swappiness is 180" \
-			output_is 180 sysctl -n vm.swappiness
-		check "60-sysctl: vm.page-cluster is 0" \
-			output_is 0 sysctl -n vm.page-cluster
 		if [ "$EXPECT_BBR" = yes ]; then
 			check "60-sysctl: congestion control is bbr" \
 				output_is bbr sysctl -n net.ipv4.tcp_congestion_control
@@ -439,6 +465,20 @@ start() {
 			check "66-vmmem: trim job runs cleanly" /usr/local/sbin/vmmem-trim
 		else
 			skip "66-vmmem: page cache trim (disabled)"
+		fi
+		if [ "$EXPECT_VMMEM_DAMON" = yes ]; then
+			check "66-vmmem: kernel has damon_reclaim" \
+				test -d /sys/module/damon_reclaim/parameters
+			check "66-vmmem: DAMON reclaim enabled and kdamond running" \
+				damon_reclaim_running
+			check "66-vmmem: DAMON min_age is ${EXPECT_VMMEM_DAMON_MIN_AGE}s" \
+				output_is "$((EXPECT_VMMEM_DAMON_MIN_AGE * 1000000))" \
+				cat /sys/module/damon_reclaim/parameters/min_age
+			# Without this one the whole thing is inert on an idle guest.
+			check "66-vmmem: DAMON active regardless of free memory" \
+				output_is 1000 cat /sys/module/damon_reclaim/parameters/wmarks_high
+		else
+			skip "66-vmmem: DAMON reclaim (disabled)"
 		fi
 	else
 		skip "66-vmmem (disabled)"

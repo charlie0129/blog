@@ -52,6 +52,18 @@ ALPINE_MIRROR=https://dl-cdn.alpinelinux.org/alpine
 # there.  Use lts on bare metal, or edge kernels at your own risk.
 KERNEL_FLAVOR=virt
 
+# A kernel of your own instead of the stock package: the directory that
+# build-kernel.sh writes (kernel-repo/ by default), holding <arch>/APKINDEX,
+# the linux-<flavour> package and the public key it was signed with.  The
+# kernel is installed from there and pinned to its exact version in
+# /etc/apk/world, so "apk upgrade" on the machine never puts the stock one
+# back; the signing key stays in /etc/apk/keys so a later package from the same
+# key installs with a plain "apk add".  The flavour must match KERNEL_FLAVOR.
+#
+# Empty builds with the stock kernel.  The shipped kernel/config.d/ turns on
+# DAMON, which VMMEM_DAMON_RECLAIM below needs.
+KERNEL_REPO_DIR=""
+
 # ---------------------------------------------------------------------------
 # Disk layout
 # ---------------------------------------------------------------------------
@@ -408,7 +420,8 @@ ENABLE_BBR=yes
 #
 #   INSTALL_K3S_EXEC="--kubelet-arg=fail-swap-on=false"
 #
-# or drop 40-zram from HOOKS (then also drop the zram sysctls in 60-sysctl).
+# or drop 40-zram from HOOKS (the zram sysctls live there too, so they go
+# with it).
 CGROUP_MODE=unified
 
 # 66-vmmem: what a guest needs so the hypervisor actually sees memory it frees.
@@ -434,6 +447,31 @@ VMMEM_THP=madvise
 # and drops the cron job.  Raise it on a file server or a build box, where a
 # warm cache is the point.
 VMMEM_CACHE_KEEP=256
+
+# Time-based reclaim through DAMON: memory nobody has touched for two minutes
+# is paged out (to the zram swap, with 40-zram), with a bounded CPU budget, so
+# the footprint tracks the working set rather than the high-water mark.  This
+# is the container-like behaviour the other knobs only approximate, and it
+# needs CONFIG_DAMON_RECLAIM, which no stock Alpine kernel has: set
+# KERNEL_REPO_DIR to the output of build-kernel.sh, or the build fails here.
+# With it on, VMMEM_CACHE_KEEP=0 is reasonable, since cold cache is covered.
+VMMEM_DAMON_RECLAIM=no
+
+# How long memory has to go untouched before DAMON pages it out, in seconds.
+# This only concerns memory that is still allocated: what a process frees goes
+# back to the host at once either way.  What a short value costs is churn --
+# crond, sshd and the libraries a ten-minute job maps get paged out and faulted
+# back every cycle, microseconds per page from zram, milliseconds for the file
+# pages -- and what a long value costs is that an idle daemon's memory stays
+# resident for that long.  120 is the kernel default; 600-1800 is a sensible
+# middle for a server that runs periodic jobs.  Two hours works, but then the
+# footprint lags the working set by two hours, which is most of what DAMON was
+# for.
+VMMEM_DAMON_MIN_AGE=120
+
+# CPU time DAMON may spend reclaiming, in milliseconds per second.  10 (1%) is
+# the kernel default and plenty: it is a bound, not a target.
+VMMEM_DAMON_QUOTA_MS=10
 
 # 91-ufw: extra allow rules, one per line, in ufw syntax.
 # UFW_ALLOW="80/tcp

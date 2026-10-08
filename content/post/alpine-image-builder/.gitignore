@@ -7,3 +7,6 @@ config.sh
 *.qcow2
 *.raw
 *.raw.*
+
+# Output of build-kernel.sh: a signed apk repository, tens of MB, rebuilt on demand.
+kernel-repo/

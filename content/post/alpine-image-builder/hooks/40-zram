@@ -39,3 +39,13 @@ EOF
 fi
 
 rc-update add zram-init boot >/dev/null
+
+# The kernel's swap defaults are tuned for spinning disks; compressed swap
+# in RAM is cheap, so make it far more willing to use what was just set up.
+cat >/etc/sysctl.d/01-zram.conf <<'EOF'
+vm.swappiness = 180
+vm.watermark_boost_factor = 0
+vm.watermark_scale_factor = 125
+# Reading ahead on swap-in is pointless when "swap" is a RAM device.
+vm.page-cluster = 0
+EOF

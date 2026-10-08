@@ -5,7 +5,7 @@
 #
 # shellcheck shell=sh
 # shellcheck disable=SC2034  # description and depend() are read by openrc
-# shellcheck disable=SC2154  # reporting_order and thp come from conf.d
+# shellcheck disable=SC2154  # reporting_order, thp and damon_* come from conf.d
 
 description="Apply guest memory give-back tunings (free page reporting, THP)"
 
@@ -18,6 +18,7 @@ depend() {
 
 ORDER_PARAM=/sys/module/page_reporting/parameters/page_reporting_order
 THP_PARAM=/sys/kernel/mm/transparent_hugepage/enabled
+DAMON_PARAMS=/sys/module/damon_reclaim/parameters
 
 start() {
 	# The balloon is normally probed from its PCI id by hwdrivers already;
@@ -40,6 +41,34 @@ start() {
 			if echo "$thp" >"$THP_PARAM"; then eend 0; else eend 1; fi
 		else
 			ewarn "kernel has no transparent hugepages, mode not set"
+		fi
+	fi
+
+	if [ "${damon_reclaim:-no}" = yes ]; then
+		if [ -d "$DAMON_PARAMS" ]; then
+			ebegin "Enabling DAMON reclaim (min_age ${damon_min_age}s, quota ${damon_quota_ms}ms/s)"
+			# Parameters first, then enabled: the module reads them when
+			# it starts the kdamond.
+			#
+			# The watermarks are the part that matters for a VM. Stock,
+			# damon_reclaim is active only while free memory is between
+			# wmarks_low (20%) and wmarks_mid (40%, until it rises above
+			# wmarks_high, 50%), i.e. it does nothing on a guest with
+			# headroom, which is precisely the guest whose footprint we
+			# want to shrink. high and mid at 1000 permille make it active
+			# at any free level above low, where kswapd takes over anyway.
+			if echo "$((damon_min_age * 1000000))" >"$DAMON_PARAMS/min_age" &&
+				echo "$damon_quota_ms" >"$DAMON_PARAMS/quota_ms" &&
+				echo 1000 >"$DAMON_PARAMS/wmarks_high" &&
+				echo 1000 >"$DAMON_PARAMS/wmarks_mid" &&
+				echo 200 >"$DAMON_PARAMS/wmarks_low" &&
+				echo Y >"$DAMON_PARAMS/enabled"; then
+				eend 0
+			else
+				eend 1
+			fi
+		else
+			ewarn "kernel has no damon_reclaim (CONFIG_DAMON_RECLAIM); not enabled"
 		fi
 	fi
 

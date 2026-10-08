@@ -201,7 +201,7 @@ Tested on the Alpine guest: cache went from 137 to 97 MiB with a 32 MiB request,
 
 **`memory.high` on a workload cgroup.** Put your containers or services in a cgroup with a `memory.high` ceiling. Reclaim then runs at the limit continuously, and freed cache becomes reportable. The downside is you have to guess the limit.
 
-**DAMON reclaim.** The most elegant, because it is time-based rather than amount-based or limit-based. DAMON samples one page per region to find memory that has not been accessed for `min_age` (default 2 minutes) and pages it out, with bounded CPU cost. That is container-like semantics: memory footprint tracks the actual working set with a lag you choose. The catch is kernel support. From the configs I checked:
+**DAMON reclaim.** The most elegant, because it is time-based rather than amount-based or limit-based. DAMON samples one page per region to find memory that has not been accessed for `min_age` (default 2 minutes) and pages it out, with bounded CPU cost. That is container-like semantics: memory footprint tracks the actual working set with a lag you choose. Two details matter in a VM. `damon_reclaim` ships with watermarks that keep it idle unless free memory is between 20% and 50% of RAM, so on a guest with headroom (the case we care about) it does nothing until `wmarks_high` and `wmarks_mid` are raised to 1000. And it pages out through the ordinary reclaim path, so cold anonymous memory needs swap to go anywhere: with zram in the guest it ends up compressed at 3–4:1 and only the saved part is reported to the host, without swap only page cache can be reclaimed. The catch is kernel support. From the configs I checked:
 
 | Kernel | `CONFIG_DAMON_RECLAIM` |
 |---|---|
@@ -212,7 +212,7 @@ Tested on the Alpine guest: cache went from 137 to 97 MiB with a 32 MiB request,
 | Alpine lts / virt | no |
 | Raspberry Pi OS 6.6 | no |
 
-So for a Debian guest, `damon_reclaim` is a module parameter away. Everywhere else, use `memory.reclaim`.
+So for a Debian guest, `damon_reclaim` is a module parameter away. Everywhere else, use `memory.reclaim`, or rebuild the kernel: for Alpine that turned out to be a Dockerfile and a six-line config fragment, described in the [image builder post]({{< ref "/post/alpine-image-builder#a-kernel-of-your-own" >}}).
 
 ## Bonus: Moving the Page Cache to the Host with virtio-pmem
 
@@ -248,4 +248,4 @@ If you want VMs on Proxmox VE to return memory like containers:
 
 That gets you within a few hundred MiB of a VM's real working set, with memory returning seconds after a process exits.
 
-For Alpine guests, points 2 to 4 are now a hook in my [image builder]({{< ref "/post/alpine-image-builder#hooks" >}}): add `66-vmmem` to `HOOKS` and the image boots with the reporting order at 2, THP in `madvise` mode, and a one-minute `memory.reclaim` job that keeps the page cache at a configurable floor.
+For Alpine guests, points 2 to 4 are now a hook in my [image builder]({{< ref "/post/alpine-image-builder#hooks" >}}): add `66-vmmem` to `HOOKS` and the image boots with the reporting order at 2, THP in `madvise` mode, and a one-minute `memory.reclaim` job that keeps the page cache at a configurable floor. With the builder's DAMON-enabled kernel, `VMMEM_DAMON_RECLAIM=yes` adds point 4's time-based reclaim as well.

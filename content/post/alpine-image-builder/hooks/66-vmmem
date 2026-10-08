@@ -53,6 +53,38 @@ case "$VMMEM_CACHE_KEEP" in
 	exit 1
 	;;
 esac
+case "$VMMEM_DAMON_RECLAIM" in
+yes | no) ;;
+*)
+	echo "66-vmmem: VMMEM_DAMON_RECLAIM must be yes or no, not '$VMMEM_DAMON_RECLAIM'" >&2
+	exit 1
+	;;
+esac
+case "$VMMEM_DAMON_MIN_AGE" in
+'' | 0 | *[!0-9]*)
+	echo "66-vmmem: VMMEM_DAMON_MIN_AGE must be a number of seconds, not '$VMMEM_DAMON_MIN_AGE'" >&2
+	exit 1
+	;;
+esac
+case "$VMMEM_DAMON_QUOTA_MS" in
+'' | 0 | *[!0-9]*)
+	echo "66-vmmem: VMMEM_DAMON_QUOTA_MS must be a number of milliseconds, not '$VMMEM_DAMON_QUOTA_MS'" >&2
+	exit 1
+	;;
+esac
+
+# DAMON is not in any stock Alpine kernel, so asking for it only makes sense
+# with a kernel from build-kernel.sh (KERNEL_REPO_DIR).  Checked here, where
+# the build can still fail, rather than discovered as a warning at boot.
+if [ "$VMMEM_DAMON_RECLAIM" = yes ]; then
+	case "$KERNEL_PKG" in
+	*=*) ;;
+	*)
+		echo "66-vmmem: VMMEM_DAMON_RECLAIM=yes needs a kernel with CONFIG_DAMON_RECLAIM; set KERNEL_REPO_DIR to the output of build-kernel.sh" >&2
+		exit 1
+		;;
+	esac
+fi
 
 # What the boot service applies. A conf.d file rather than values baked into
 # the init script, so it can be changed on the running machine too.
@@ -67,6 +99,15 @@ reporting_order="$VMMEM_REPORTING_ORDER"
 
 # Transparent huge pages: always, madvise or never. Empty leaves the default.
 thp="$VMMEM_THP"
+
+# DAMON-based proactive reclaim (yes/no): page out memory nobody has touched
+# for damon_min_age seconds, spending at most damon_quota_ms of CPU per second
+# on it. Needs CONFIG_DAMON_RECLAIM, which only a kernel from build-kernel.sh
+# has. The service also raises damon_reclaim's watermarks so it stays active
+# while memory is plentiful; stock, it only works between 20% and 50% free.
+damon_reclaim="$VMMEM_DAMON_RECLAIM"
+damon_min_age="$VMMEM_DAMON_MIN_AGE"
+damon_quota_ms="$VMMEM_DAMON_QUOTA_MS"
 EOF
 
 cat >/etc/conf.d/vmmem-trim <<EOF
@@ -112,8 +153,8 @@ fi
 if [ -n "$VMMEM_REPORTING_ORDER" ] && [ "$VMMEM_REPORTING_ORDER" -lt 9 ]; then
 	# Proactive compaction exists to form 2 MiB blocks. With reports going
 	# out at a smaller order that is work for nothing (OrbStack turns it off
-	# as well). 60-sysctl owns 01- and 02-; this is a separate file so either
-	# hook can be dropped without the other noticing.
+	# as well). 40-zram and 60-sysctl own 01- and 02-; this is a separate
+	# file so any hook can be dropped without the others noticing.
 	cat >/etc/sysctl.d/03-vmmem.conf <<'EOF2'
 # Free page reporting runs at an order below the pageblock, so forming 2 MiB
 # blocks in the background buys nothing (66-vmmem).
