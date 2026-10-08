@@ -127,6 +127,26 @@ zram_swap_active() { grep -q '^/dev/zram' /proc/swaps; }
 controller_delegated() {
 	tr ' ' '\n' </sys/fs/cgroup/cgroup.subtree_control | grep -qx "$1"
 }
+# THP's enabled file lists every mode and brackets the active one.
+thp_mode_is() {
+	grep -o '\[[a-z]*\]' /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null |
+		grep -qx "\[$1\]"
+}
+page_reporting_order_is() {
+	[ "$(cat /sys/module/page_reporting/parameters/page_reporting_order 2>/dev/null)" = "$1" ]
+}
+# A balloon device (virtio id 5) that negotiated feature bit 5, REPORTING.
+# testboot.sh gives the guest no balloon, so this is printed, not checked.
+balloon_reporting() {
+	for _dev in /sys/bus/virtio/devices/*; do
+		[ -r "$_dev/device" ] || continue
+		[ "$(cat "$_dev/device")" = 0x0005 ] || continue
+		[ "$(cut -c6 "$_dev/features")" = 1 ] && echo negotiated || echo "not offered"
+		return 0
+	done
+	echo "no balloon device"
+}
+
 mounted_fstype() { awk -v t="$1" '$3 == t { found = 1 } END { exit !found }' /proc/mounts; }
 tmp_on_zram() { mount_field /tmp 1 | grep -q zram; }
 
@@ -391,6 +411,37 @@ start() {
 		esac
 	else
 		skip "65-cgroups (disabled)"
+	fi
+
+	if hook_enabled 66-vmmem; then
+		check "66-vmmem: service in the boot runlevel" in_runlevel vmmem
+		check "66-vmmem: service started" svc_started vmmem
+		info "66-vmmem: virtio-balloon free page reporting: $(balloon_reporting)"
+		if [ -n "$EXPECT_VMMEM_ORDER" ]; then
+			check "66-vmmem: page_reporting_order is $EXPECT_VMMEM_ORDER" \
+				page_reporting_order_is "$EXPECT_VMMEM_ORDER"
+		else
+			skip "66-vmmem: page_reporting_order (kernel default)"
+		fi
+		if [ -n "$EXPECT_VMMEM_THP" ]; then
+			check "66-vmmem: THP is $EXPECT_VMMEM_THP" thp_mode_is "$EXPECT_VMMEM_THP"
+		else
+			skip "66-vmmem: THP (kernel default)"
+		fi
+		if [ "$EXPECT_VMMEM_CACHE_KEEP" != 0 ]; then
+			check "66-vmmem: trim job in root's crontab" \
+				grep -q vmmem-trim /etc/crontabs/root
+			check "66-vmmem: memory.reclaim available" \
+				test -w /sys/fs/cgroup/memory.reclaim
+			# Runs the real thing once: a quoting or arithmetic mistake
+			# in the script would otherwise only ever show up in cron's
+			# mail nobody reads.
+			check "66-vmmem: trim job runs cleanly" /usr/local/sbin/vmmem-trim
+		else
+			skip "66-vmmem: page cache trim (disabled)"
+		fi
+	else
+		skip "66-vmmem (disabled)"
 	fi
 
 	if hook_enabled 70-growroot; then

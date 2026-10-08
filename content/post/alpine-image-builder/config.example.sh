@@ -342,6 +342,9 @@ HOOKS="10-network 20-ssh 30-chrony 40-zram 50-logtruncate 60-sysctl 65-cgroups 7
 # Also shipped, off by default because they are opinionated rather than
 # essential.  Append the ones you want:
 #
+#   66-vmmem       make a VM hand freed memory back to the hypervisor: free page
+#                  reporting at 16 KiB granularity, THP in madvise mode, and a
+#                  one-minute page cache trim (VMMEM_*).  Harmless on bare metal.
 #   90-tools       bash, coreutils, iproute2, tcpdump, htop, ... (~120M)
 #   91-ufw         ufw with a deny-incoming ruleset
 #   92-sshguard    sshguard + nftables, without enabling the nftables service
@@ -351,7 +354,7 @@ HOOKS="10-network 20-ssh 30-chrony 40-zram 50-logtruncate 60-sysctl 65-cgroups 7
 #   95-dotfiles    git, zsh, lsd and a dotfiles repo; zsh becomes root's login
 #                  shell (~67M of files, 21M of it on compressed btrfs)
 #
-# 91-ufw, 92-sshguard and 95-dotfiles are small enough to add at the default
+# 66-vmmem, 91-ufw, 92-sshguard and 95-dotfiles are small enough to add at the default
 # IMAGE_SIZE on any of the three filesystems.  The other three are not:
 # 90-tools + 93-podman + 94-cloud-init together fit on btrfs at 512M (274M
 # allocated, zstd doing the work) but run the 381M xfs root out of space partway
@@ -407,6 +410,30 @@ ENABLE_BBR=yes
 #
 # or drop 40-zram from HOOKS (then also drop the zram sysctls in 60-sysctl).
 CGROUP_MODE=unified
+
+# 66-vmmem: what a guest needs so the hypervisor actually sees memory it frees.
+# QEMU and Proxmox (unless balloon: 0) already enable virtio-balloon free page
+# reporting; these are the guest-side settings that make it effective.  See
+# https://charlie0129.github.io/p/vm-memory-give-back/ for the measurements.
+#
+# Reporting granularity as a page order.  The kernel default is 9 (2 MiB), and
+# memory freed in smaller scattered pieces never forms a 2 MiB block, so the
+# host never hears about it.  2 is 16 KiB, what OrbStack uses; 600 MiB that was
+# invisible at the default came back within 12 s.  Costs more report traffic.
+# Empty leaves the kernel default.
+VMMEM_REPORTING_ORDER=2
+
+# Transparent huge pages.  With "always", freeing part of a huge page does not
+# free anything until memory pressure, whatever the order above says.  Empty
+# leaves the kernel default (always on Alpine).
+VMMEM_THP=madvise
+
+# Page cache to keep, in MiB.  Cache above this is reclaimed once a minute,
+# least recently used first, through the root cgroup's memory.reclaim -- so it
+# becomes free, and reportable.  Needs CGROUP_MODE=unified.  0 disables the trim
+# and drops the cron job.  Raise it on a file server or a build box, where a
+# warm cache is the point.
+VMMEM_CACHE_KEEP=256
 
 # 91-ufw: extra allow rules, one per line, in ufw syntax.
 # UFW_ALLOW="80/tcp

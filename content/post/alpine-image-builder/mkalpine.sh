@@ -202,6 +202,9 @@ fi
 : "${ZRAM_TMP:=yes}"
 : "${ENABLE_BBR:=yes}"
 : "${CGROUP_MODE:=unified}"
+: "${VMMEM_REPORTING_ORDER:=2}"
+: "${VMMEM_THP:=madvise}"
+: "${VMMEM_CACHE_KEEP:=256}"
 : "${UFW_ALLOW:=}"
 : "${EXTRA_TOOLS:=}"
 : "${PODMAN_IPV6:=no}"
@@ -257,6 +260,9 @@ case "$PARTITION_TABLE" in gpt | mbr) ;; *) die "PARTITION_TABLE must be gpt or 
 case "$BOOT_MODE" in both | bios | uefi) ;; *) die "BOOT_MODE must be both, bios or uefi" ;; esac
 case "$GRUB_CFG_MODE" in auto | static) ;; *) die "GRUB_CFG_MODE must be auto or static" ;; esac
 case "$PODMAN_IPV6" in yes | no) ;; *) die "PODMAN_IPV6 must be yes or no" ;; esac
+case "$VMMEM_REPORTING_ORDER" in '' | [0-9]) ;; *) die "VMMEM_REPORTING_ORDER must be empty or a single digit 0-9" ;; esac
+case "$VMMEM_THP" in '' | always | madvise | never) ;; *) die "VMMEM_THP must be empty, always, madvise or never" ;; esac
+case "$VMMEM_CACHE_KEEP" in '' | *[!0-9]*) die "VMMEM_CACHE_KEEP must be a number of MiB (0 disables the trim)" ;; esac
 
 # A dual-stack network on a host that will not forward IPv6 is a network whose
 # containers have an address and no route.
@@ -1087,6 +1093,7 @@ if [ -n "$HOOKS" ]; then
 		IP_ADDRESS GATEWAY DNS NTP_POOL ZRAM_ALGO ZRAM_SWAP_RATIO \
 		ZRAM_TMP ENABLE_BBR CGROUP_MODE UFW_ALLOW EXTRA_TOOLS PODMAN_IPV6 \
 		PODMAN_IPV6_SUBNET \
+		VMMEM_REPORTING_ORDER VMMEM_THP VMMEM_CACHE_KEEP \
 		DOTFILES_REPO DOTFILES_DIR DOTFILES_SHELL DOTFILES_Z4H; do
 		eval "value=\$$var"
 		# shellcheck disable=SC2154  # assigned by the eval above

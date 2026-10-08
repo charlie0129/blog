@@ -1,0 +1,65 @@
+#!/sbin/openrc-run
+#
+# Installed as /etc/init.d/vmmem by the 66-vmmem hook. Settings come from
+# /etc/conf.d/vmmem, which OpenRC sources before this runs.
+#
+# shellcheck shell=sh
+# shellcheck disable=SC2034  # description and depend() are read by openrc
+# shellcheck disable=SC2154  # reporting_order and thp come from conf.d
+
+description="Apply guest memory give-back tunings (free page reporting, THP)"
+
+depend() {
+	# After sysctl, so that nothing in /etc/sysctl.d runs after this and
+	# undoes it; after modules, which is where a virtio_balloon line in
+	# /etc/modules would be honoured.
+	after modules sysctl
+}
+
+ORDER_PARAM=/sys/module/page_reporting/parameters/page_reporting_order
+THP_PARAM=/sys/kernel/mm/transparent_hugepage/enabled
+
+start() {
+	# The balloon is normally probed from its PCI id by hwdrivers already;
+	# this is for a kernel where the driver is a module and nothing loaded
+	# it. On a machine with no balloon the module just finds no device.
+	modprobe -q virtio_balloon 2>/dev/null || true
+
+	if [ -n "$reporting_order" ]; then
+		if [ -w "$ORDER_PARAM" ]; then
+			ebegin "Setting free page reporting order to $reporting_order"
+			if echo "$reporting_order" >"$ORDER_PARAM"; then eend 0; else eend 1; fi
+		else
+			ewarn "kernel has no page_reporting (CONFIG_PAGE_REPORTING), order not set"
+		fi
+	fi
+
+	if [ -n "$thp" ]; then
+		if [ -w "$THP_PARAM" ]; then
+			ebegin "Setting transparent hugepages to $thp"
+			if echo "$thp" >"$THP_PARAM"; then eend 0; else eend 1; fi
+		else
+			ewarn "kernel has no transparent hugepages, mode not set"
+		fi
+	fi
+
+	# Worth a line in the boot log: without a balloon that negotiated the
+	# reporting feature, none of the above does anything for the host.
+	# Device id 5 is virtio-balloon; feature bit 5 is VIRTIO_BALLOON_F_REPORTING.
+	for dev in /sys/bus/virtio/devices/*; do
+		[ -r "$dev/device" ] || continue
+		[ "$(cat "$dev/device")" = 0x0005 ] || continue
+		if [ "$(cut -c6 "$dev/features")" = 1 ]; then
+			einfo "virtio-balloon: free page reporting negotiated"
+		else
+			ewarn "virtio-balloon present but the host did not offer free page reporting"
+		fi
+		return 0
+	done
+	einfo "no virtio-balloon device; the host will not see freed memory"
+	return 0
+}
+
+stop() {
+	return 0
+}

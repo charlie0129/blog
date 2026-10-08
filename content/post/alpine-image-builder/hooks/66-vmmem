@@ -1,0 +1,122 @@
+#!/bin/sh
+# 66-vmmem - make the VM give freed memory back to the hypervisor.
+#
+# A Linux guest never hands a page back to the host on its own: freed memory
+# just moves to the guest's free list and the host keeps backing it. virtio-
+# balloon's free page reporting fixes that for memory the guest frees in large
+# enough blocks, and QEMU/Proxmox already turn it on for any VM with a balloon
+# device. Three things still get in the way on a stock guest, and this hook
+# deals with them:
+#
+#   - Reports are made in blocks of 2^page_reporting_order pages, 2 MiB by
+#     default. Memory freed in smaller, scattered pieces never forms such a
+#     block and stays invisible to the host. Lowering the order to 2 (16 KiB,
+#     what OrbStack uses) made 600 MiB of fragmented free memory come back
+#     within seconds in my tests, where the default returned none of it.
+#   - Transparent huge pages in "always" mode park partially-freed huge pages
+#     on a deferred-split queue until memory pressure, so from the host's point
+#     of view nothing was freed at all. "madvise" avoids that.
+#   - Page cache is never free, so it is never reported, and a guest with
+#     headroom has no pressure that would ever evict it. A cron job asks the
+#     kernel for ordinary LRU reclaim of the cache above a floor, through the
+#     root cgroup's memory.reclaim, which needs the one cgroup v2 tree that
+#     65-cgroups mounts.
+#
+# The first two are kernel knobs that could go on the cmdline, but GRUB is
+# installed before the hooks run, so a service sets them at boot instead; the
+# effect is the same, both are read at use rather than at init. Everything is
+# harmless on bare metal or under a hypervisor without a balloon: the knobs
+# are then just unused.
+#
+# The service and the trim job are in hooks/files/, as real files rather than
+# heredocs, so shellcheck can read them. The numbers behind the defaults are in
+# https://charlie0129.github.io/p/vm-memory-give-back/.
+set -eu
+
+case "$VMMEM_REPORTING_ORDER" in
+'' | [0-9]) ;;
+*)
+	echo "66-vmmem: VMMEM_REPORTING_ORDER must be empty or 0-9, not '$VMMEM_REPORTING_ORDER'" >&2
+	exit 1
+	;;
+esac
+case "$VMMEM_THP" in
+'' | always | madvise | never) ;;
+*)
+	echo "66-vmmem: VMMEM_THP must be empty, always, madvise or never, not '$VMMEM_THP'" >&2
+	exit 1
+	;;
+esac
+case "$VMMEM_CACHE_KEEP" in
+'' | *[!0-9]*)
+	echo "66-vmmem: VMMEM_CACHE_KEEP must be a number of MiB (0 disables), not '$VMMEM_CACHE_KEEP'" >&2
+	exit 1
+	;;
+esac
+
+# What the boot service applies. A conf.d file rather than values baked into
+# the init script, so it can be changed on the running machine too.
+cat >/etc/conf.d/vmmem <<EOF
+# Written by the 66-vmmem hook from the build-time config. Applied at boot by
+# /etc/init.d/vmmem; "rc-service vmmem restart" applies an edit right away.
+
+# Free page reporting granularity, as a page order: 2 = 16 KiB, 9 = 2 MiB (the
+# kernel default). Lower reports more of what a process frees, at the cost of
+# more report traffic to the host. Empty leaves the kernel default alone.
+reporting_order="$VMMEM_REPORTING_ORDER"
+
+# Transparent huge pages: always, madvise or never. Empty leaves the default.
+thp="$VMMEM_THP"
+EOF
+
+cat >/etc/conf.d/vmmem-trim <<EOF
+# Written by the 66-vmmem hook. Read by /usr/local/sbin/vmmem-trim every minute
+# from root's crontab.
+
+# Page cache to leave alone, in MiB. Anything above it is handed to the kernel's
+# normal reclaim, oldest first, and so becomes free -- and reportable to the
+# host. 0 disables the trim without touching the crontab.
+cache_keep_mib="$VMMEM_CACHE_KEEP"
+
+# At most this much per run, so one minute never turns into a reclaim storm.
+cache_step_mib="1024"
+EOF
+
+install -m 0755 /tmp/mkalpine/files/vmmem.initd /etc/init.d/vmmem
+# -D: a minirootfs has no /usr/local/sbin yet.
+install -D -m 0755 /tmp/mkalpine/files/vmmem-trim /usr/local/sbin/vmmem-trim
+
+# boot, not default: the order should be in place before anything has freed
+# memory worth reporting, and sysctl has to have run first (see depend()).
+rc-update add vmmem boot >/dev/null
+
+if [ "$VMMEM_CACHE_KEEP" != 0 ]; then
+	# memory.reclaim lives on the root of the unified hierarchy, so the
+	# trim is only meaningful with one cgroup v2 tree on /sys/fs/cgroup.
+	if [ "$CGROUP_MODE" != unified ]; then
+		echo "66-vmmem: the page cache trim needs CGROUP_MODE=unified (memory.reclaim is a cgroup v2 file); set VMMEM_CACHE_KEEP=0 to build without it" >&2
+		exit 1
+	fi
+	# 65-cgroups mounts it in the default HOOKS list; this is for an image
+	# built without that hook, the same as 93-podman does. rc-update exits 0
+	# when the service is already there.
+	rc-update add cgroups boot >/dev/null
+	# busybox crond reads /etc/crontabs/<user>; the file is root's whole
+	# crontab, so append rather than replace.
+	mkdir -p /etc/crontabs
+	grep -qs vmmem-trim /etc/crontabs/root ||
+		printf '*\t*\t*\t*\t*\t/usr/local/sbin/vmmem-trim\n' >>/etc/crontabs/root
+	chmod 0600 /etc/crontabs/root
+fi
+
+if [ -n "$VMMEM_REPORTING_ORDER" ] && [ "$VMMEM_REPORTING_ORDER" -lt 9 ]; then
+	# Proactive compaction exists to form 2 MiB blocks. With reports going
+	# out at a smaller order that is work for nothing (OrbStack turns it off
+	# as well). 60-sysctl owns 01- and 02-; this is a separate file so either
+	# hook can be dropped without the other noticing.
+	cat >/etc/sysctl.d/03-vmmem.conf <<'EOF2'
+# Free page reporting runs at an order below the pageblock, so forming 2 MiB
+# blocks in the background buys nothing (66-vmmem).
+vm.compaction_proactiveness = 0
+EOF2
+fi

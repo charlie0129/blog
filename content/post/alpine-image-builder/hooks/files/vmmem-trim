@@ -1,0 +1,45 @@
+#!/bin/sh
+#
+# Installed as /usr/local/sbin/vmmem-trim by the 66-vmmem hook and run every
+# minute from root's crontab. Reclaims page cache above a floor so that it
+# becomes free memory, which free page reporting then hands to the host.
+#
+# This is ordinary LRU reclaim through the root cgroup's memory.reclaim --
+# least recently used file pages go first, and swappiness=0 keeps anonymous
+# memory out of it -- not drop_caches, which throws everything away at once.
+# A guest with no memory pressure would otherwise keep its cache forever.
+#
+# shellcheck disable=SC1091  # /etc/conf.d/vmmem-trim is generated at build time
+set -u
+
+cache_keep_mib=256
+cache_step_mib=1024
+[ -r /etc/conf.d/vmmem-trim ] && . /etc/conf.d/vmmem-trim
+
+[ "${cache_keep_mib:-0}" -gt 0 ] || exit 0
+
+reclaim=/sys/fs/cgroup/memory.reclaim
+# Pre-5.19 kernel, or no unified hierarchy at /sys/fs/cgroup: nothing to do,
+# and nothing to say every minute either.
+[ -w "$reclaim" ] || exit 0
+
+# What LRU reclaim with swappiness=0 can actually get rid of: file pages that
+# are not tmpfs or shmem. Buffers are file pages too.
+cache_mib=$(awk '
+	/^Buffers:/ { b = $2 }
+	/^Cached:/ { c = $2 }
+	/^Shmem:/ { s = $2 }
+	END { print int((b + c - s) / 1024) }' /proc/meminfo)
+
+excess=$((cache_mib - cache_keep_mib))
+[ "$excess" -gt 0 ] || exit 0
+[ "$excess" -gt "$cache_step_mib" ] && excess=$cache_step_mib
+
+# swappiness= is accepted from 6.6; an older kernel answers EINVAL to the whole
+# write, so fall back to a plain amount there (which may then also swap).
+# Either form returns EAGAIN when it could not reclaim the full amount, which
+# is not an error here: the rest is still in use, try again next minute.
+echo "${excess}M swappiness=0" >"$reclaim" 2>/dev/null ||
+	echo "${excess}M" >"$reclaim" 2>/dev/null ||
+	true
+exit 0
