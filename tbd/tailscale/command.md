@@ -3,7 +3,7 @@
 curl -fsSL https://tailscale.com/install.sh | sh
 tailscale up
 # Do not mess with my DNS
-tailscale set --accept-dns=false
+tailscale set --accept-dns=false --snat-subnet-routes=false
 # If you want to use a custom relay server, you can set the port like this:
 tailscale set --relay-server-port=xxx
 # DO NOT set --port= same as relay port, it will break the relay server.

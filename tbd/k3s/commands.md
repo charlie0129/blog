@@ -10,17 +10,38 @@ mv k3s-airgap-images-amd64.tar.zst /var/lib/rancher/k3s/agent/images/k3s-airgap-
 mv k3s /usr/local/bin/k3s
 chmod +x /usr/local/bin/k3s
 
-touch /etc/rancher/k3s/vpn-auth
-chmod 600 /etc/rancher/k3s/vpn-auth
-# this key must be tagged with tag:xxx
-echo "name=tailscale,joinKey=tskey-auth-XXXXX" >> /etc/rancher/k3s/vpn-auth
+# No vpn-auth: tailscale is self-managed, k3s is only a tenant (see
+# config.yaml below). Prerequisite: tailscaled is running (OpenRC svc
+# `tailscale`) and the node was joined ONCE, by hand:
+#   tailscale up --authkey=tskey-... --advertise-tags=tag:k8s-cn --accept-dns=false --snat-subnet-routes=false
+# k3s then never calls `tailscale up` (no --reset of accept-dns, no dependency
+# on authkey expiry, ≤90d); it only runs flannel's additive `tailscale set`.
+
+# k3s must never start before tailscale0 exists: without vpn-auth there is no
+# `tailscale up` fallback, flannel just exits if the iface is missing
+echo 'rc_need="tailscale"' > /etc/conf.d/k3s
 ```
 
 ### `/etc/rancher/k3s/config.yaml`
 
 ```yaml
-# vpn-auth handles node-ip/external-ip/flannel-iface/route advertisement
-vpn-auth-file: /etc/rancher/k3s/vpn-auth
+# Self-managed tailscale (NO vpn-auth — it would run `tailscale up
+# --authkey --reset` on any start where ts isn't Running: reset accept-dns →
+# resolv.conf wiped → coredns crash-loop (happened once on this cluster),
+# extra advertised routes wiped, and a hard dependency on authkey expiry
+# ≤90d). These four keys replicate everything vpn-auth overrode (k3s source:
+# embed.go:115-131,190, server.go:556-562). Route advertisement is NOT among
+# them — that is flannel's job: every start runs `tailscale set
+# --accept-routes --advertise-routes=$SUBNET,$IPV6SUBNET,...` (setup.go:44-52)
+# via the extension backend, merging whatever routes are already advertised
+# (manually added routes survive k3s restarts):
+node-ip: 100.100.100.10,fd7a:115c:a1e0::10  # THIS node's ts IPs, dual-stack (example values)
+flannel-backend: tailscale  # without it: silently defaults to vxlan
+                            # (embed.go:190 was the ONLY place vpn-auth set it)
+flannel-iface: tailscale0   # also fixes pod MTU=1280 (flannel ext backend MTU = iface MTU)
+advertise-address: 100.100.100.10  # keeps `endpoints kubernetes` on the ts IP;
+                                   # the default would be the VPC IP, which is
+                                   # unreachable from nodes in other clouds/VPCs
 
 # Supervisor + apiserver listen port (default 6443). Agents join on this port.
 # Set before first start on purpose: the internal loopback apiserver is this
@@ -108,6 +129,45 @@ mirrors:
       - https://docker.1ms.run
 ```
 
+### Pod source-IP preservation (`snat-subnet-routes`)
+
+Tailscale subnet routers SNAT by default: on the destination node, cross-node
+pod traffic arrives masqueraded as that node's cni0 address (remote pods /
+NetworkPolicies / logs would see the gateway IP, not the source pod). The
+`--snat-subnet-routes=false` in the `tailscale up` join command above covers
+new nodes; for an already-joined node, run ONCE (persisted pref, survives
+reboots and k3s restarts — flannel's per-start `tailscale set` only touches
+accept-routes/advertise-routes, never this):
+
+```bash
+tailscale set --snat-subnet-routes=false
+tailscale debug prefs | grep NoSNAT     # expect true
+```
+
+Return paths are fine by construction: every node RouteAll (accept-routes),
+so each has the remote pod /24 in table 52. Side effect: tailnet clients
+hitting pods directly now present their real 100.x as source — only works
+for route-accepting clients (macOS/Linux do; Windows never accepts routes).
+
+Verified live 2026-10-15 (nginx sink pod on node B + busybox client on node
+A, both directions, real pod IPs in the nginx access log). Surprise finding:
+source IPs were ALREADY preserved before the flip — with k3s's default
+kube-router network-policy controller, FORWARD contains
+`-m mark --mark 0x20000/0x20000 -j ACCEPT` (KUBE-ROUTER) ABOVE `-j
+ts-forward`, so compliant packets are accepted before tailscale sets its
+0x40000 SNAT mark in ts-forward, and the `ts-postrouting` MASQUERADE
+(`-m mark --mark 0x40000/0xff0000`) never matches. The flip removes the
+MASQUERADE entirely (`iptables -t nat -S ts-postrouting` → empty chain),
+making the behavior explicit instead of dependent on iptables rule ORDER —
+which is not a contract across k3s/tailscale upgrades. Verify after upgrades:
+
+```bash
+# on each node: empty = SNAT rule absent (good)
+iptables -t nat -S ts-postrouting
+# cross-node source check: exec wget from a pod on node A to an nginx pod on
+# node B, `kubectl logs` must show node A's pod IP, not B's cni0 IP
+```
+
 ### Tailscale ACL autoApprovers
 
 Must cover BOTH pod routes (flannel's tailscale backend advertises
@@ -135,10 +195,8 @@ mkdir -p /var/lib/rancher/k3s/server/tls/etcd && cd /var/lib/rancher/k3s/server/
 
 rc-service k3s start
 
-# k3s's own `tailscale up` resets accept-dns to true, which (with MagicDNS
-# off + tailnet search domains) rewrites resolv.conf with no nameservers and
-# crash-loops coredns. Re-apply after the first start; it then persists.
-tailscale set --accept-dns=false
+# (no tailscale step needed here anymore: accept-dns=false was set once at
+# `tailscale up`; without vpn-auth, k3s never touches ts prefs)
 
 openssl x509 -enddate -noout -in /var/lib/rancher/k3s/server/tls/serving-kube-apiserver.crt && openssl x509 -enddate -noout -in /var/lib/rancher/k3s/server/tls/server-ca.crt
 ```
@@ -172,6 +230,12 @@ kubectl -n kube-node-lease get lease -o custom-columns=NAME:.metadata.name,RENEW
 grep -o 'node-monitor-grace-period=10m' /var/log/k3s.log | tail -1
 # containerd regenerated the mirror config
 cat /var/lib/rancher/k3s/agent/etc/containerd/certs.d/docker.io/hosts.toml
+# self-managed tailscale took effect
+grep -o '"Type": "[a-z]*"' /var/lib/rancher/k3s/agent/etc/flannel/net-conf.json  # expect "extension"
+kubectl -n default get endpoints kubernetes  # ts IP:26443, NOT the VPC IP
+tailscale debug prefs | grep -E '"(RouteAll|CorpDNS)"'  # true/false — k3s must never flip these
+# cross-node dataplane over tailscale (run on the server, 10.42.1.x = an agent pod)
+ping -c2 10.42.1.1
 # metrics-server needs TWO scrapes before it serves (up to 2 x 10m after a
 # restart) -- "Metrics API not available" in that window is normal
 kubectl top nodes
@@ -219,19 +283,26 @@ on managed nodes.
 
 ### On the agent
 
+Prerequisite: tailscaled up + joined, same as the server (`tailscale up
+--authkey=... --advertise-tags=tag:k8s-cn --accept-dns=false
+--snat-subnet-routes=false`). No vpn-auth anywhere.
+
 ```bash
 mkdir -p /etc/rancher/k3s
-touch /etc/rancher/k3s/vpn-auth
-chmod 600 /etc/rancher/k3s/vpn-auth
-# name=tailscale,joinKey=tskey-auth-XXXX
+echo 'rc_need="tailscale"' > /etc/conf.d/k3s-agent
 ```
 
 `/etc/rancher/k3s/config.yaml`:
 
 ```yaml
-server: https://aliyun-cn-bjc-k-001-internal.k8s.pktio.com:26443
+server: https://k3s-server.internal.example.com:26443  # ts-resolvable name, SAN'd in tls-san
 token: <output of k3s token create>
-vpn-auth-file: /etc/rancher/k3s/vpn-auth
+# self-managed tailscale, same idea as the server but WITHOUT flannel-backend
+# (agents have no such flag: they inherit the backend from the server's
+# control config over the supervisor connection, agent config.go:545) and
+# without advertise-address (no apiserver on agents):
+node-ip: 100.100.100.20,fd7a:115c:a1e0::20  # THIS node's ts IPs (example values)
+flannel-iface: tailscale0
 kubelet-arg:
   - fail-swap-on=false
   - container-log-max-size=2Mi
@@ -240,7 +311,6 @@ kubelet-arg:
 
 ```bash
 INSTALL_K3S_SKIP_DOWNLOAD=true INSTALL_K3S_EXEC=agent /root/install.sh
-tailscale set --accept-dns=false
 ```
 
 ## Reduce k3s server memory (server only)
@@ -271,3 +341,20 @@ rc-service k3s restart
 tr '\0' '\n' < /proc/$(pgrep -f 'k3s server' | head -1)/environ | grep '^GOGC'
 ps -o pid,rss,comm | awk '/k3s-server/ {printf "%.0f MiB\n", $2/1024}'
 ```
+
+## History
+
+- 2026-10-04/05: cluster originally built with `vpn-auth-file`. Migrated to
+  the self-managed-tailscale config above on 2026-10-15 (tailscale prefs
+  survived the restarts byte-identical). One live slip during migration:
+  the first restart without `flannel-backend: tailscale` regenerated
+  net-conf.json as **vxlan** — embed.go:190 was the only place vpn-auth set
+  the backend, and the flag otherwise defaults to vxlan. Caught before
+  flannel started with it (flannel waits for apiserver readiness); lesson:
+  always diff `agent/etc/flannel/net-conf.json` after config changes.
+  Rollback copies of the vpn-auth era: `config.yaml.bak-vpn-20261015` on
+  both nodes; the vpn-auth files remain on disk, unreferenced.
+- `rc_need="tailscale"` boot ordering is pinned on both nodes
+  (`/etc/conf.d/k3s` on the server, `/etc/conf.d/k3s-agent` on tencent) but
+  not yet reboot-drilled — cold-boot one node at a convenient time and check
+  `rc-service k3s status` + `kubectl get nodes`.
