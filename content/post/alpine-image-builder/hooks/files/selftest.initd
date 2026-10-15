@@ -159,6 +159,13 @@ damon_reclaim_running() {
 }
 
 mounted_fstype() { awk -v t="$1" '$3 == t { found = 1 } END { exit !found }' /proc/mounts; }
+
+# A mount in a peer group has shared:<n> among mountinfo's optional fields,
+# between the mount options and the "-"; a private one has none.
+mount_is_shared() {
+	awk -v mnt="$1" '$5 == mnt { for (i = 7; $i != "-"; i++) if ($i ~ /^shared:/) found = 1 }
+		END { exit !found }' /proc/self/mountinfo
+}
 tmp_on_zram() { mount_field /tmp 1 | grep -q zram; }
 
 # login_shell_is <user> <shell> -- <shell> is a name or an absolute path, the
@@ -482,6 +489,14 @@ start() {
 		fi
 	else
 		skip "66-vmmem (disabled)"
+	fi
+
+	if hook_enabled 67-rshared; then
+		check "67-rshared: service in the boot runlevel" in_runlevel rshared
+		check "67-rshared: service started" svc_started rshared
+		check "67-rshared: / is a shared mount" mount_is_shared /
+	else
+		skip "67-rshared (disabled)"
 	fi
 
 	if hook_enabled 70-growroot; then

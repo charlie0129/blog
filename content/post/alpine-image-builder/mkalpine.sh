@@ -189,7 +189,7 @@ fi
 : "${PACKAGES:=}"
 : "${HOOKS_DIR:=$SCRIPT_DIR/hooks}"
 : "${OVERLAY_DIR:=$SCRIPT_DIR/overlay}"
-: "${HOOKS:=10-network 20-ssh 30-chrony 40-zram 50-logtruncate 60-sysctl 65-cgroups 70-growroot 80-firstboot}"
+: "${HOOKS:=10-network 20-ssh 30-chrony 40-zram 50-logtruncate 60-sysctl 65-cgroups 67-rshared 70-growroot 80-firstboot}"
 
 : "${OUTPUT_FORMATS:=raw}"
 : "${WORK_DIR:=}"

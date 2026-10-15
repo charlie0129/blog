@@ -1,0 +1,25 @@
+#!/sbin/openrc-run
+#
+# Installed as /etc/init.d/rshared by the 67-rshared hook.
+#
+# shellcheck shell=sh
+# shellcheck disable=SC2034  # description and depend() are read by openrc
+
+description="Make / and every mount under it shared, as systemd does"
+
+depend() {
+	# After the fstab mounts, so the boot log reads in order. Nothing
+	# depends on it beyond that: a mount made later under a shared one is
+	# shared itself.
+	after localmount
+}
+
+start() {
+	ebegin "Making / a shared mount"
+	mount --make-rshared /
+	eend $?
+}
+
+stop() {
+	return 0
+}

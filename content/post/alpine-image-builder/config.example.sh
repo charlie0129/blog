@@ -349,7 +349,7 @@ PACKAGES=""
 # hook is therefore already a session leader and should not call setsid itself --
 # busybox's applet forks when its caller is one, which turns a synchronous
 # command into a background job whose exit status is lost.
-HOOKS="10-network 20-ssh 30-chrony 40-zram 50-logtruncate 60-sysctl 65-cgroups 70-growroot 80-firstboot"
+HOOKS="10-network 20-ssh 30-chrony 40-zram 50-logtruncate 60-sysctl 65-cgroups 67-rshared 70-growroot 80-firstboot"
 
 # Also shipped, off by default because they are opinionated rather than
 # essential.  Append the ones you want:

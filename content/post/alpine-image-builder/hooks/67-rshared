@@ -1,0 +1,24 @@
+#!/bin/sh
+# 67-rshared - make / a shared mount at boot, as systemd does.
+#
+# The kernel creates every mount private, and nothing in OpenRC changes that.
+# systemd marks / shared, recursively, first thing at boot, and container
+# runtimes are written against that default. On a private / containerd
+# refuses any host path mounted with mountPropagation HostToContainer --
+# node-exporter's view of the host's /, CSI drivers, log collectors:
+#
+#   path "/" is mounted on "/" but it is not a shared or slave mount
+#
+# and podman warns that "/" is not a shared mount. Shared only means that
+# a mount made on the host later also appears in containers that asked to
+# receive it; mounts made inside a container still stay there unless it
+# asked for Bidirectional.
+#
+# The service is in hooks/files/, as a real file, so shellcheck can read it.
+set -eu
+
+install -m 0755 /tmp/mkalpine/files/rshared.initd /etc/init.d/rshared
+
+# boot, not default: k3s, containerd, docker and podman all start in default,
+# and / has to be shared before they mount anything.
+rc-update add rshared boot >/dev/null
