@@ -465,11 +465,121 @@ sed -i "s|$| $additional_cmdline|" /etc/kernel/cmdline
 proxmox-boot-tool refresh
 ```
 
-On my host, `/etc/kernel/cmdline` now contains:
+After this step, `/etc/kernel/cmdline` contains:
 
 ```text
 root=ZFS=rpool/ROOT/pve-1 boot=zfs vmlinuz video=vesafb:ywrap,mtrr initrd=initrd.magic console=tty0 console=ttyS0,115200n8
 ```
+
+## Lock the CPU Governor and Disable Deep C-States
+
+When a core goes idle, the kernel can put it into progressively deeper C-states. Deeper states save more power but take longer to wake up from. On this box an idle core could drop all the way to C8, with up to 200 µs exit latency, and most of the time it did. Every packet to a VM has to wake a halted vCPU thread and a vhost thread, so that latency shows up directly in guest network latency.
+
+This is a small virtualization host, not a laptop. I prefer lower latency over a few watts of idle power, so I keep the `performance` governor and allow only C1.
+
+Check what the CPU is using first:
+
+```console
+# cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver
+intel_pstate
+# cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
+performance
+# cat /sys/devices/system/cpu/cpuidle/current_driver
+intel_idle
+# for s in /sys/devices/system/cpu/cpu0/cpuidle/state*; do echo "$(basename $s) $(cat $s/name) $(cat $s/latency)us"; done
+state0 POLL 0us
+state1 C1 2us
+state2 C1E 10us
+state3 C3 70us
+state4 C6 85us
+state5 C7s 124us
+state6 C8 200us
+```
+
+The governor is already `performance`, because the Proxmox kernel is built with `CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y`. With `intel_pstate` in active (HWP) mode, the `performance` policy also sets the energy-performance preference (EPP) to `performance`. I still set `cpufreq.default_governor=performance` on the command line so it does not depend on a kernel build default.
+
+For C-states, there are a few kernel parameters that look similar but are not:
+
+- `intel_idle.states_off=<mask>`: each bit is a state index as shown in sysfs (bit 0 is `state0`, POLL). The states are still registered but disabled by default, so you can re-enable them at runtime without a reboot. `0x3fc` sets bits 2-9: C1E and everything deeper are off, POLL and C1 stay on. Bits past the last state are ignored, so this still covers deeper states if a future kernel changes the table.
+- `intel_idle.max_cstate=1`: the same result on this machine, but deeper states are never registered, so going back needs a reboot. The number counts entries in the driver's table, not the C-state name: `max_cstate=4` means up to C6 on this CPU, not C4.
+- `processor.max_cstate=1`: only applies to the `acpi_idle` driver, so it does nothing while `intel_idle` is in use. The common `intel_idle.max_cstate=0 processor.max_cstate=1` recipe disables `intel_idle` entirely and falls back to whatever states the BIOS describes in ACPI. On AMD machines, which have no `intel_idle`, this is the parameter that matters.
+- `idle=poll`: idle cores spin instead of halting. It burns power and takes execution resources away from the Hyper-Threading sibling. C1 already wakes up in 2 µs.
+
+I use `intel_idle.states_off=0x3fc`.
+
+As with the serial console, the kernel command line comes from `/etc/kernel/cmdline`, because this host boots with systemd-boot through `proxmox-boot-tool` (UEFI + ZFS root). `/etc/default/grub` is not used here, so editing it and running `update-grub` does nothing.
+
+```bash
+cp -a /etc/kernel/cmdline /etc/kernel/cmdline.bak
+sed -i '1 s/$/ cpufreq.default_governor=performance intel_idle.states_off=0x3fc/' /etc/kernel/cmdline
+proxmox-boot-tool refresh
+```
+
+`proxmox-boot-tool refresh` writes the new options into the boot entries on both ESPs, and kernel upgrades read the same file again. The final command line:
+
+```text
+root=ZFS=rpool/ROOT/pve-1 boot=zfs vmlinuz video=vesafb:ywrap,mtrr initrd=initrd.magic console=tty0 console=ttyS0,115200n8 cpufreq.default_governor=performance intel_idle.states_off=0x3fc
+```
+
+To apply it now without rebooting, disable the same states through sysfs:
+
+```bash
+for f in /sys/devices/system/cpu/cpu[0-9]*/cpuidle/state[2-9]/disable; do
+  echo 1 > "$f"
+done
+```
+
+Write `0` to the same files to turn the deep states back on, for example to compare. After a reboot, `/sys/module/intel_idle/parameters/states_off` should read `1020` (`0x3fc` in decimal), and the `default_status` of `state2` to `state6` should read `disabled`.
+
+Before and after on this host, measured with `turbostat` (from the `linux-cpupower` package; it needs the `msr` module loaded in the monitoring section below) and `ping` from the host:
+
+| | All C-states | C1 only |
+| --- | --- | --- |
+| Idle residency | 87% core C7, 77% package C2 | 99% C1, no package C-states |
+| Idle package power (30 s average) | 3.9 W | 8.4 W |
+| Idle package temperature (30 s average) | 35 °C | 36 °C |
+| One busy thread, other cores idle | 4178 MHz | 4000 MHz |
+| Ping host → VM, avg / max | 0.199 / 0.361 ms | 0.068 / 0.259 ms |
+| Ping host → CT, avg / max | 0.052 / 0.082 ms | 0.021 / 0.056 ms |
+
+Ping latency to a VM dropped to about a third. The cost is about 4.5 W at idle (temperature barely moves) and a lower single-thread peak. The E3-1270 v6 turbo limit depends on how many cores are active: 4.2 GHz with one, 4.1 GHz with two or three, 4.0 GHz with four. A core sitting in C1 still counts as active, so with every idle core parked in C1, one busy thread is held to the four-core 4.0 GHz bin. All-core load already ran at 4.0 GHz, so it is not affected.
+
+### htop Still Shows 800 MHz
+
+After this change, htop still showed some cores at 800 MHz from time to time. Those readings are not real frequencies.
+
+htop reads `scaling_cur_freq`. With `intel_pstate` in active mode, the kernel calculates that value from the APERF/MPERF counters, which it samples on the scheduler tick. An idle core stops its tick, so it may have no recent sample. When the last sample is more than about 20 ms old, the kernel reports a fallback value instead, and on this machine the fallback is exactly the 800 MHz minimum. You can see the pattern in the raw values: each reading is either about 4,000,000 kHz or exactly 800,000, never anything in between:
+
+```console
+# for i in 1 2 3; do cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq | tr '\n' ' '; echo; sleep 1; done
+3999997 4000960 3998036 3999994 4000076 4000084 3998228 4000424
+800000 3999995 800000 3999904 4000008 800000 4000033 3999959
+800000 4000012 800000 3999611 3998786 3998900 4000032 4000149
+```
+
+Other files in sysfs do not help. `cpuinfo_cur_freq` does not exist in this mode. `cpuinfo_avg_freq` does exist, but it uses the same tick samples and reports the same 800 MHz on idle cores.
+
+To see the real frequency, read the MSRs with `turbostat`. `Bzy_MHz` is the average frequency while the core was executing instructions:
+
+```console
+# turbostat --quiet --show CPU,Busy%,Bzy_MHz,CPU%c1 --interval 5 --num_iterations 1
+CPU	Busy%	Bzy_MHz	CPU%c1
+-	2.11	4000	97.89
+0	1.93	4000	98.07
+4	1.90	4000	98.10
+1	1.68	4000	98.32
+5	2.92	4000	97.08
+2	1.73	4000	98.27
+6	2.79	4000	97.21
+3	2.75	4000	97.25
+7	1.17	4000	98.83
+```
+
+Every CPU runs at 4.0 GHz whenever it executes anything, and `thermal_throttle/*_throttle_count` is 0 on all of them.
+
+The 800 MHz in htop does not mean the hardware has dropped to 800 MHz while idle. The `performance` policy pins the HWP request to min = max = ratio 42, and `turbostat` reports `MSR_HWP_REQUEST: min 42 max 42`. C1 only stops the core clock. Voltage and frequency stay where they were, and the core resumes at 4.0 GHz after the 2 µs exit. C1E is the state that drops to the minimum voltage and frequency, and it is disabled.
+
+The only way to make htop show 4 GHz all the time is `idle=poll`, which is not worth it for the reasons above.
 
 ## Scratch Storage
 
@@ -1182,5 +1292,6 @@ The host ended up with:
 - 80/443 forwarded to a service CT.
 - Pi-hole handling private DHCP and DNS.
 - Podman-based host monitoring.
+- `performance` CPU governor with deep C-states disabled (C1 only).
 
 For 19.90 USD/month, this is a surprisingly useful little virtualization box.

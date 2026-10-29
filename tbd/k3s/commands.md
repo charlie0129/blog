@@ -188,10 +188,15 @@ Must cover BOTH pod routes (flannel's tailscale backend advertises
 INSTALL_K3S_SKIP_DOWNLOAD=true INSTALL_K3S_SKIP_START=true /root/install.sh
 # 100 year leaf certs
 echo 'CATTLE_NEW_SIGNED_CERT_EXPIRATION_DAYS=36500' >> /etc/rancher/k3s/k3s.env
-# 100 year CA. Keep the keyUsage: Python 3.13+ clients (Grafana's k8s-sidecar,
+# 100 year CAs. Keep the keyUsage: Python 3.13+ clients (Grafana's k8s-sidecar,
 # anything on urllib3 >= 2.3) refuse a CA without it -- "CA cert does not
-# include key usage extension". The first cluster's CAs (2026-10-04) lack it.
-mkdir -p /var/lib/rancher/k3s/server/tls/etcd && cd /var/lib/rancher/k3s/server/tls && openssl genrsa -out service.key 2048 2>/dev/null && for ca in client-ca server-ca request-header-ca etcd/peer-ca etcd/server-ca; do openssl ecparam -name prime256v1 -genkey -noout -out $ca.key && openssl req -x509 -new -key $ca.key -sha256 -days 36500 -subj "/CN=k3s-$(basename $ca)" -addext "keyUsage=critical,digitalSignature,keyCertSign,cRLSign" -out $ca.crt; done && chmod 600 *.key etcd/*.key && ls -la
+# include key usage extension". The first cluster's CAs (2026-10-04) lack it;
+# fixable post-hoc, see "Re-issuing the first cluster's CAs" at the bottom.
+# One openssl call per CA (keygen fused into req; OpenSSL 3 auto-adds critical
+# basicConstraints CA:TRUE + SKI/AKI and writes the key 0600). No service.key
+# pre-seed needed: k3s generates it itself when missing (deps.go
+# genServiceAccount -> dynamiclistener NewPrivateKey, same RSA-2048).
+mkdir -p /var/lib/rancher/k3s/server/tls/etcd && cd /var/lib/rancher/k3s/server/tls && for ca in client-ca server-ca request-header-ca etcd/peer-ca etcd/server-ca; do openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -sha256 -days 36500 -subj "/CN=k3s-$(basename $ca)" -addext "keyUsage=critical,digitalSignature,keyCertSign,cRLSign" -keyout $ca.key -out $ca.crt; done && chmod 600 *.key etcd/*.key && ls -la
 
 rc-service k3s start
 
@@ -342,19 +347,122 @@ tr '\0' '\n' < /proc/$(pgrep -f 'k3s server' | head -1)/environ | grep '^GOGC'
 ps -o pid,rss,comm | awk '/k3s-server/ {printf "%.0f MiB\n", $2/1024}'
 ```
 
+## Re-issuing the first cluster's CAs (`k3s certificate rotate-ca`)
+
+The first cluster's hand-made CAs (2026-10-04) have no keyUsage, which Python
+3.13+ rejects under default strict X.509 checks — sidecars currently carry
+`DISABLE_X509_STRICT_VERIFICATION` for this. k3s has a supported fix that
+needs no rebuild: `k3s certificate rotate-ca`. Key fact: the authoritative CA
+material lives in the **datastore's encrypted bootstrap key** (server token as
+passphrase), `server/tls` on disk is only an extract — so never edit
+server/tls in place; stage new files to a temp dir and load via rotate-ca.
+
+k3s ships `contrib/util/rotate-default-ca-certs.sh` for exactly this CA shape
+(flat self-signed): it creates NEW roots cross-signed by the old CAs plus new
+intermediate leaf CAs, and bundles each as [new leaf CA, new root
+(self-signed), new root (cross-signed by old), old root]. Existing leafs keep
+verifying through the old root (Go clients never cared), new leafs chain
+through the keyUsage'd new root. It also appends the old key to a fresh
+service.key (SA tokens survive). Stock validity is 20y (`-days 7300` x3);
+bump to this cluster's 100y first. Back up `/var/lib/rancher/k3s/server`
+(db + tls) before starting — note `k3s etcd-snapshot` subcommands dial
+127.0.0.1:6443 no matter the https-listen-port, so on this cluster take a
+file-level copy instead.
+
+**Do NOT use the token values the script prints.** Upstream bug (verified
+2026-10-15): the script fingerprints the new INTERMEDIATE cert
+(`server-ca.pem`), but k3s's hashCA/appendCertsFromPEM (pkg/clientaccess/
+token.go) only trusts a K10 hash equal to a SELF-SIGNED ROOT's DER hash in
+the bundle — with the script's token the trust pool ends up empty and the
+agent loops `CA cert validation failed ... x509: certificate signed by
+unknown authority` every 2s. The old token is equally dead (its legacy hash
+is sha256 of the old single-cert PEM file bytes, which matches nothing in a
+4-cert bundle). The correct token appears by itself: **after the server's
+restart, k3s rewrites `server/token` + `server/agent-token` with the right
+root hash** — copy the agent-token FILE into the agent's config.yaml.
+
+```bash
+# ON THE SERVER (needs bash; apk add bash. If github is unreachable, fetch
+# the script elsewhere and scp it over)
+cd /tmp && curl -sLO https://github.com/k3s-io/k3s/raw/main/contrib/util/rotate-default-ca-certs.sh
+sed -i 's/-days 7300/-days 36500/g' rotate-default-ca-certs.sh
+bash rotate-default-ca-certs.sh
+# -> /var/lib/rancher/k3s/server/rotate-ca (staging; move out of the data
+#    dir afterwards -- it holds the new ROOT keys, which k3s doesn't need
+#    at runtime)
+
+# load into the datastore (default server URL is 6443; ours is 26443, hence -s)
+k3s certificate rotate-ca -s https://127.0.0.1:26443 --path=/var/lib/rancher/k3s/server/rotate-ca
+
+# server: restart reloads the CAs from the datastore; rotate-ca also touched
+# tls/dynamic-cert-regenerate, so the apiserver serving cert is re-signed by
+# the new server-ca. This restart also rewrites the token files (see above).
+rc-service k3s restart
+
+# agent token from the REWRITTEN file (not the script output!):
+#   sed -i "s|^token:.*|token: $(cat /var/lib/rancher/k3s/server/agent-token)|" ...
+# then restart the agent:
+rc-service k3s-agent restart
+```
+
+Verify:
+
+```bash
+# CA extract now shows Key Usage on every cert; bundles are 4 certs each
+openssl x509 -noout -text -in /var/lib/rancher/k3s/server/tls/server-ca.crt | grep -A1 'Key Usage'
+# the check that Python 3.13 performs (this is what used to fail):
+echo | openssl s_client -connect 127.0.0.1:26443 \
+  -CAfile /var/lib/rancher/k3s/server/tls/server-ca.crt -x509_strict -verify_return_error 2>/dev/null \
+  | grep "Verify return code"   # expect: 0 (ok)
+# agent picked up the new bundles: agent/server-ca.crt + client-ca.crt = 4 certs
+# cluster: nodes Ready, leases advancing, no pods restarting
+```
+
+Once the server is back, the apiserver presents a fully keyUsage'd chain and
+the sidecars' `DISABLE_X509_STRICT_VERIFICATION` can be deleted (restart those
+pods after removing it). In-pod `ca.crt` (projected kube-root-ca.crt) refreshes
+on its own after the controller-manager restarts; until then strict clients
+may still fail briefly — the cross-signed path ends in the old keyUsage-less
+root, so a pod holding the stale CA still builds a failing chain. Optional
+later cleanup: `k3s certificate rotate` per node (stop k3s, rotate, start)
+re-signs the remaining old-CA leafs (etcd, kubelet, kube-proxy), after which
+the old root kept in each bundle is dead weight until it expires 2036.
+
+Clusters bootstrapped with the keyUsage'd recipe above never need any of this.
+
 ## History
+
+- 2026-10-15: rotated the first cluster's CAs with the process above (k3s
+  v1.37.1, both nodes). Result: apiserver serving chain re-signed by the new
+  server-ca, strict X.509 verify (`openssl s_client -x509_strict`) returns
+  0 (ok), nodes Ready, leases advancing, zero unexpected pod restarts,
+  kube-root-ca.crt ConfigMap already serves the 4-cert bundle (the grafana
+  sidecars' DISABLE_X509_STRICT_VERIFICATION can be dropped now — left in
+  place for now). Rollback + new-root keys: `/root/pre-carotate-backup/` on
+  the aliyun server (db copy + tls/cred/token tar + rotate-ca staging,
+  0700). Hit the rotate script token-hash bug documented above the hard way
+  (agent looped on "certificate signed by unknown authority" until the token
+  was taken from the post-restart agent-token file). Old CA leafs (kubelet
+  client/serving, kube-proxy, etcd, admin kubeconfig) still verify via the
+  cross-signed old root and need no action; re-sign them per node someday
+  with `k3s certificate rotate` if desired.
 
 - 2026-10-04/05: cluster originally built with `vpn-auth-file`. Migrated to
   the self-managed-tailscale config above on 2026-10-15 (tailscale prefs
   survived the restarts byte-identical). One live slip during migration:
   the first restart without `flannel-backend: tailscale` regenerated
   net-conf.json as **vxlan** — embed.go:190 was the only place vpn-auth set
-  the backend, and the flag otherwise defaults to vxlan. Caught before
-  flannel started with it (flannel waits for apiserver readiness); lesson:
-  always diff `agent/etc/flannel/net-conf.json` after config changes.
+  the backend, and the flag otherwise defaults to vxlan. Flannel had time
+  to create `flannel.1` + `flannel-v6.1` on the server before the fix
+  (no traffic ever flowed through them); deleted 2026-10-15 and they did
+  NOT reappear after the cold boots below. Lesson: always diff
+  `agent/etc/flannel/net-conf.json` after config changes.
   Rollback copies of the vpn-auth era: `config.yaml.bak-vpn-20261015` on
   both nodes; the vpn-auth files remain on disk, unreferenced.
-- `rc_need="tailscale"` boot ordering is pinned on both nodes
-  (`/etc/conf.d/k3s` on the server, `/etc/conf.d/k3s-agent` on tencent) but
-  not yet reboot-drilled — cold-boot one node at a convenient time and check
-  `rc-service k3s status` + `kubectl get nodes`.
+- 2026-10-15: reboot drill PASSED on both nodes (cold boots, after the CA
+  rotation above — which this also validated end to end). tencent:
+  tailscaled 14:41:30 → k3s-agent 14:41:31 (rc_need ordering visible);
+  server: same-second process starts but service-ordered by rc_need. After
+  both boots: nodes Ready, all pods Running, `endpoints kubernetes` on the
+  ts IP, net-conf still "extension", flannel ifaces 0, ts prefs intact
+  incl. NoSNAT=true (persisted across cold boot), cross-node ping ~7.7ms.
