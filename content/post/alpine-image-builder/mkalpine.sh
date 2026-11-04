@@ -207,10 +207,15 @@ fi
 : "${CGROUP_MODE:=unified}"
 : "${VMMEM_REPORTING_ORDER:=2}"
 : "${VMMEM_THP:=madvise}"
-: "${VMMEM_CACHE_KEEP:=256}"
 : "${VMMEM_DAMON_RECLAIM:=no}"
+# The page cache trim works against DAMON (it evicts cache in use, DAMON keeps
+# it), so with DAMON it is off unless asked for.
+if [ "$VMMEM_DAMON_RECLAIM" = yes ]; then
+	: "${VMMEM_CACHE_KEEP:=0}"
+else
+	: "${VMMEM_CACHE_KEEP:=256}"
+fi
 : "${VMMEM_DAMON_MIN_AGE:=120}"
-: "${VMMEM_DAMON_QUOTA_MS:=10}"
 : "${UFW_ALLOW:=}"
 : "${EXTRA_TOOLS:=}"
 : "${PODMAN_IPV6:=no}"
@@ -271,7 +276,6 @@ case "$VMMEM_THP" in '' | always | madvise | never) ;; *) die "VMMEM_THP must be
 case "$VMMEM_CACHE_KEEP" in '' | *[!0-9]*) die "VMMEM_CACHE_KEEP must be a number of MiB (0 disables the trim)" ;; esac
 case "$VMMEM_DAMON_RECLAIM" in yes | no) ;; *) die "VMMEM_DAMON_RECLAIM must be yes or no" ;; esac
 case "$VMMEM_DAMON_MIN_AGE" in '' | 0 | *[!0-9]*) die "VMMEM_DAMON_MIN_AGE must be a number of seconds" ;; esac
-case "$VMMEM_DAMON_QUOTA_MS" in '' | 0 | *[!0-9]*) die "VMMEM_DAMON_QUOTA_MS must be a number of milliseconds per second" ;; esac
 
 # The custom kernel repository: a signed APKINDEX for this architecture, the
 # public key it was signed with, and exactly one package for the flavour.  The
@@ -1164,7 +1168,7 @@ if [ -n "$HOOKS" ]; then
 		ZRAM_TMP ENABLE_BBR CGROUP_MODE UFW_ALLOW EXTRA_TOOLS PODMAN_IPV6 \
 		PODMAN_IPV6_SUBNET \
 		VMMEM_REPORTING_ORDER VMMEM_THP VMMEM_CACHE_KEEP VMMEM_DAMON_RECLAIM \
-		VMMEM_DAMON_MIN_AGE VMMEM_DAMON_QUOTA_MS \
+		VMMEM_DAMON_MIN_AGE \
 		DOTFILES_REPO DOTFILES_DIR DOTFILES_SHELL DOTFILES_Z4H; do
 		eval "value=\$$var"
 		# shellcheck disable=SC2154  # assigned by the eval above

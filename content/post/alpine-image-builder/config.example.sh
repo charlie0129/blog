@@ -355,8 +355,9 @@ HOOKS="10-network 20-ssh 30-chrony 40-zram 50-logtruncate 60-sysctl 65-cgroups 6
 # essential.  Append the ones you want:
 #
 #   66-vmmem       make a VM hand freed memory back to the hypervisor: free page
-#                  reporting at 16 KiB granularity, THP in madvise mode, and a
-#                  one-minute page cache trim (VMMEM_*).  Harmless on bare metal.
+#                  reporting at 16 KiB granularity, THP in madvise mode, and
+#                  page cache reclaim, by DAMON or a one-minute trim
+#                  (VMMEM_*).  Harmless on bare metal.
 #   90-tools       bash, coreutils, iproute2, tcpdump, htop, ... (~120M)
 #   91-ufw         ufw with a deny-incoming ruleset
 #   92-sshguard    sshguard + nftables, without enabling the nftables service
@@ -445,16 +446,19 @@ VMMEM_THP=madvise
 # least recently used first, through the root cgroup's memory.reclaim -- so it
 # becomes free, and reportable.  Needs CGROUP_MODE=unified.  0 disables the trim
 # and drops the cron job.  Raise it on a file server or a build box, where a
-# warm cache is the point.
-VMMEM_CACHE_KEEP=256
+# warm cache is the point.  Empty means 256, or 0 with VMMEM_DAMON_RECLAIM=yes:
+# the trim goes by size and evicts cache that is in use, DAMON goes by age and
+# keeps it, so with DAMON the trim only gets in the way.
+VMMEM_CACHE_KEEP=
 
 # Time-based reclaim through DAMON: memory nobody has touched for two minutes
-# is paged out (to the zram swap, with 40-zram), with a bounded CPU budget, so
-# the footprint tracks the working set rather than the high-water mark.  This
-# is the container-like behaviour the other knobs only approximate, and it
-# needs CONFIG_DAMON_RECLAIM, which no stock Alpine kernel has: set
-# KERNEL_REPO_DIR to the output of build-kernel.sh, or the build fails here.
-# With it on, VMMEM_CACHE_KEEP=0 is reasonable, since cold cache is covered.
+# is paged out, so the footprint tracks the working set rather than the
+# high-water mark.  Page cache is dropped; cold heap goes
+# to the zram swap with 40-zram, and stays put without any swap.  This is the
+# container-like behaviour the other knobs only approximate.  It is set up
+# through the DAMON sysfs interface, which no stock Alpine kernel has
+# (CONFIG_DAMON is off): set KERNEL_REPO_DIR to the output of build-kernel.sh,
+# or the build fails here.  Turns the page cache trim above off by default.
 VMMEM_DAMON_RECLAIM=no
 
 # How long memory has to go untouched before DAMON pages it out, in seconds.
@@ -469,9 +473,11 @@ VMMEM_DAMON_RECLAIM=no
 # for.
 VMMEM_DAMON_MIN_AGE=120
 
-# CPU time DAMON may spend reclaiming, in milliseconds per second.  10 (1%) is
-# the kernel default and plenty: it is a bound, not a target.
-VMMEM_DAMON_QUOTA_MS=10
+# There is deliberately no DAMON quota.  A quota is spent on the oldest
+# memory first, and the oldest memory is free memory, which has nothing to
+# reclaim; with the kernel's default quota no page cache was reclaimed at all.
+# Instead each region is walked at most once per VMMEM_DAMON_MIN_AGE, which
+# costs about 0.3% of one CPU on a 4 GiB guest.
 
 # 91-ufw: extra allow rules, one per line, in ufw syntax.
 # UFW_ALLOW="80/tcp

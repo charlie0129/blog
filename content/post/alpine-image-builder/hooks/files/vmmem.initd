@@ -7,18 +7,113 @@
 # shellcheck disable=SC2034  # description and depend() are read by openrc
 # shellcheck disable=SC2154  # reporting_order, thp and damon_* come from conf.d
 
-description="Apply guest memory give-back tunings (free page reporting, THP)"
+description="Apply guest memory give-back tunings (free page reporting, THP, DAMON)"
 
 depend() {
 	# After sysctl, so that nothing in /etc/sysctl.d runs after this and
 	# undoes it; after modules, which is where a virtio_balloon line in
-	# /etc/modules would be honoured.
-	after modules sysctl
+	# /etc/modules would be honoured; after zram-init, so that the swap
+	# check below sees the zram swap from 40-zram.
+	after modules sysctl zram-init
 }
 
 ORDER_PARAM=/sys/module/page_reporting/parameters/page_reporting_order
 THP_PARAM=/sys/kernel/mm/transparent_hugepage/enabled
-DAMON_PARAMS=/sys/module/damon_reclaim/parameters
+DAMON_ADMIN=/sys/kernel/mm/damon/admin
+
+# Proactive reclaim: a physical-address kdamond with one scheme, built through
+# the DAMON sysfs interface, that pages out memory nobody has touched for
+# damon_min_age seconds. The kernel's ready-made damon_reclaim module does the
+# same in principle but gets two things wrong in a VM:
+#
+#   - It monitors only the biggest System RAM range. A guest with more than
+#     about 3 GiB has its RAM split around the PCI hole, and everything below
+#     the hole is never looked at. Here every range is a target region.
+#   - Its quota (10 ms and 128 MiB per second) is spent oldest regions
+#     first, and the oldest regions are free memory, which has nothing to
+#     reclaim: the budget is gone before DAMON reaches any page cache. The
+#     time quota cannot grow past its 40 MiB starting estimate either,
+#     because walking free memory takes less than a clock tick and so is
+#     never charged any time. Here there is no quota at all. The scheme is
+#     applied once a second instead of every aggregation, and applying it
+#     resets a region's age, so each region is walked at most once per
+#     damon_min_age: free memory costs one cheap walk per period, and the
+#     actual reclaim is bounded by how much memory went cold.
+#
+# (On 6.12 the module does not work at all: damon_reclaim_apply_parameters()
+# commits an empty context over its own scheme. Fixed in 6.17.)
+damon_start() {
+	k=$DAMON_ADMIN/kdamonds/0
+	c=$k/contexts/0
+	s=$c/schemes/0
+
+	# A restart rebuilds the kdamond from scratch.
+	if [ "$(cat "$DAMON_ADMIN/kdamonds/nr_kdamonds")" -gt 0 ] &&
+		[ "$(cat "$k/state")" = on ]; then
+		echo off >"$k/state" || return 1
+	fi
+
+	echo 1 >"$DAMON_ADMIN/kdamonds/nr_kdamonds" &&
+		echo 1 >"$k/contexts/nr_contexts" &&
+		echo paddr >"$c/operations" &&
+		echo 5000 >"$c/monitoring_attrs/intervals/sample_us" &&
+		echo 100000 >"$c/monitoring_attrs/intervals/aggr_us" &&
+		echo 1000000 >"$c/monitoring_attrs/intervals/update_us" &&
+		echo 10 >"$c/monitoring_attrs/nr_regions/min" &&
+		echo 1000 >"$c/monitoring_attrs/nr_regions/max" &&
+		echo 1 >"$c/targets/nr_targets" || return 1
+
+	# One region per top-level System RAM range in /proc/iomem.
+	ranges=$(awk '$2 == ":" && $3 " " $4 == "System RAM" { print $1 }' /proc/iomem)
+	set -- $ranges
+	echo $# >"$c/targets/0/regions/nr_regions" || return 1
+	i=0
+	for r in $ranges; do
+		echo $((0x${r%-*})) >"$c/targets/0/regions/$i/start" &&
+			echo $((0x${r#*-} + 1)) >"$c/targets/0/regions/$i/end" || return 1
+		i=$((i + 1))
+	done
+
+	# Not accessed at all, for damon_min_age seconds. age is counted in
+	# aggregation intervals, 100 ms above.
+	echo 1 >"$c/schemes/nr_schemes" &&
+		echo pageout >"$s/action" &&
+		echo 1000000 >"$s/apply_interval_us" &&
+		echo 4096 >"$s/access_pattern/sz/min" &&
+		echo 18446744073709551615 >"$s/access_pattern/sz/max" &&
+		echo 0 >"$s/access_pattern/nr_accesses/min" &&
+		echo 0 >"$s/access_pattern/nr_accesses/max" &&
+		echo $((damon_min_age * 10)) >"$s/access_pattern/age/min" &&
+		echo 4294967295 >"$s/access_pattern/age/max" &&
+		echo 0 >"$s/quotas/ms" &&
+		echo 0 >"$s/quotas/bytes" || return 1
+
+	# Watermarks switch the scheme on and off by free memory, in permille.
+	# Stock values (high 500, mid 400, low 200) start it only below 40% free,
+	# i.e. never on a guest with headroom, which is exactly the guest whose
+	# footprint we want to shrink, and stop it below 20%, which leaves a busy
+	# guest without proactive reclaim. high = mid = 1000 and low = 0 keep it
+	# on at every free level.
+	echo free_mem_rate >"$s/watermarks/metric" &&
+		echo 5000000 >"$s/watermarks/interval_us" &&
+		echo 1000 >"$s/watermarks/high" &&
+		echo 1000 >"$s/watermarks/mid" &&
+		echo 0 >"$s/watermarks/low" || return 1
+
+	# Without swap an anonymous page can only be put back, so skip them and
+	# reclaim page cache only. With swap (40-zram) cold heap goes to zram,
+	# which is the point. Decided once, here: a swap added later needs a
+	# "rc-service vmmem restart".
+	if [ "$(wc -l </proc/swaps)" -gt 1 ]; then
+		echo 0 >"$s/filters/nr_filters" || return 1
+	else
+		echo 1 >"$s/filters/nr_filters" &&
+			echo anon >"$s/filters/0/type" &&
+			echo Y >"$s/filters/0/matching" || return 1
+	fi
+
+	echo on >"$k/state"
+}
 
 start() {
 	# The balloon is normally probed from its PCI id by hwdrivers already;
@@ -45,30 +140,12 @@ start() {
 	fi
 
 	if [ "${damon_reclaim:-no}" = yes ]; then
-		if [ -d "$DAMON_PARAMS" ]; then
-			ebegin "Enabling DAMON reclaim (min_age ${damon_min_age}s, quota ${damon_quota_ms}ms/s)"
-			# Parameters first, then enabled: the module reads them when
-			# it starts the kdamond.
-			#
-			# The watermarks are the part that matters for a VM. Stock,
-			# damon_reclaim is active only while free memory is between
-			# wmarks_low (20%) and wmarks_mid (40%, until it rises above
-			# wmarks_high, 50%), i.e. it does nothing on a guest with
-			# headroom, which is precisely the guest whose footprint we
-			# want to shrink. high and mid at 1000 permille make it active
-			# at any free level above low, where kswapd takes over anyway.
-			if echo "$((damon_min_age * 1000000))" >"$DAMON_PARAMS/min_age" &&
-				echo "$damon_quota_ms" >"$DAMON_PARAMS/quota_ms" &&
-				echo 1000 >"$DAMON_PARAMS/wmarks_high" &&
-				echo 1000 >"$DAMON_PARAMS/wmarks_mid" &&
-				echo 200 >"$DAMON_PARAMS/wmarks_low" &&
-				echo Y >"$DAMON_PARAMS/enabled"; then
-				eend 0
-			else
-				eend 1
-			fi
+		if [ -d "$DAMON_ADMIN" ]; then
+			ebegin "Starting DAMON reclaim (min_age ${damon_min_age}s)"
+			damon_start
+			eend $?
 		else
-			ewarn "kernel has no damon_reclaim (CONFIG_DAMON_RECLAIM); not enabled"
+			ewarn "kernel has no DAMON sysfs interface (CONFIG_DAMON_SYSFS); not enabled"
 		fi
 	fi
 

@@ -75,7 +75,7 @@ If you run Proxmox 8 or 9 with Linux guests, the fix is simply: do not set `ball
 
 Two more things kill it silently:
 
-- `hugepages:` in the VM config. The host cannot discard sub-hugepage ranges, so reports are pointless.
+- `hugepages:` in the VM config. QEMU silently ignores any report that isn't aligned to the RAM block's page size (`virtio_balloon_handle_report`). With 1 GiB pages nothing comes back. With 2 MiB pages only whole, aligned 2 MiB blocks do, so the order-2 tuning below is useless there.
 - Guest kernels without `CONFIG_PAGE_REPORTING` or without a free page reporting capable balloon driver. Linux 5.7+ has it. FreeBSD and Windows guests on the same host showed RSS equal to their full memory despite the QEMU flag, because their balloon drivers do not implement it.
 
 ## What Free Page Reporting Does Not Cover
@@ -201,18 +201,118 @@ Tested on the Alpine guest: cache went from 137 to 97 MiB with a 32 MiB request,
 
 **`memory.high` on a workload cgroup.** Put your containers or services in a cgroup with a `memory.high` ceiling. Reclaim then runs at the limit continuously, and freed cache becomes reportable. The downside is you have to guess the limit.
 
-**DAMON reclaim.** The most elegant, because it is time-based rather than amount-based or limit-based. DAMON samples one page per region to find memory that has not been accessed for `min_age` (default 2 minutes) and pages it out, with bounded CPU cost. That is container-like semantics: memory footprint tracks the actual working set with a lag you choose. Two details matter in a VM. `damon_reclaim` ships with watermarks that keep it idle unless free memory is between 20% and 50% of RAM, so on a guest with headroom (the case we care about) it does nothing until `wmarks_high` and `wmarks_mid` are raised to 1000. And it pages out through the ordinary reclaim path, so cold anonymous memory needs swap to go anywhere: with zram in the guest it ends up compressed at 3–4:1 and only the saved part is reported to the host, without swap only page cache can be reclaimed. The catch is kernel support. From the configs I checked:
+**DAMON reclaim.** The most elegant, because it is time-based rather than amount-based or limit-based. DAMON samples one page per region to find memory that has not been accessed for `min_age` (default 2 minutes) and pages it out. That is container-like semantics: memory footprint tracks the actual working set with a lag you choose. Both methods evict least recently used data first; the difference is that `memory.reclaim` decides *how much* by a size floor, evicting cache that is still in use once it is over the floor, and DAMON decides by idle time and keeps any working set however large. Before evicting, it re-checks each page's accessed bit, so hot pages inside a cold region survive. The kernel ships a ready-made `damon_reclaim` module, and four of its defaults are wrong for a VM:
+
+- **Watermarks** switch it on and off by free memory in permille: off above `high` or below `low`, staying off between `mid` and `high`, otherwise on. The defaults (500/400/200) start it only once free memory drops below 40%, so a guest with headroom, the case we care about, never runs it, and they stop it below 20% free, so a busy guest doesn't either. 1000/1000/0 keeps it on at every level.
+- **Monitored range.** It watches only the biggest "System RAM" range in `/proc/iomem`. In a VM larger than about 3 GiB that is the part above 4 GiB, and memory below the PCI hole is never looked at.
+- **Quota.** 10 ms and 128 MiB per second, spent on the oldest regions first. The oldest regions are free memory, which has nothing to reclaim, so the budget is gone before DAMON reaches any page cache. The time quota can't adapt either: it converts time into bytes with a throughput estimate, and walking free memory finishes within a clock tick, so it is never charged any time and the estimate never leaves its 40 MiB starting value. With just the 10 ms time quota on a 4 GiB Alpine guest, DAMON tried 7 GiB of regions over a few minutes and reclaimed about 1 MiB of a 100 MiB cold file. No quota at all works: a region's age resets when the scheme is applied to it, so each region is walked at most once per `min_age`, free memory included. Applying once a second instead of every 100 ms aggregation, kdamond used 0.3–0.4% of one CPU (1.6% while it was also compressing 300 MiB of cold heap into zram), and 100 MiB of cold cache was gone within 15 s of becoming eligible.
+- **Swap.** It pages out through the ordinary reclaim path, so cold anonymous memory needs swap to go anywhere: with zram in the guest it ends up compressed at 3–4:1 and only the saved part is reported to the host. Without swap only page cache can be reclaimed, and a filter that skips anonymous pages saves the wasted attempts.
+
+The module can only fix the first two through its parameters, so I set DAMON up through its sysfs interface instead (`/sys/kernel/mm/damon/admin`): one physical-address kdamond, one target region per System RAM range, a `pageout` scheme for regions with zero accesses for `min_age`, no quota, a 1 s apply interval, watermarks 1000/1000/0, and an `anon` reject filter when there is no swap. That is about 40 writes; the Debian and Alpine versions are in the [image builder's]({{< ref "/post/alpine-image-builder#hooks" >}}) `hooks/files/vmmem.initd`. The catch is kernel support. From the configs I checked:
 
 | Kernel | `CONFIG_DAMON_RECLAIM` |
 |---|---|
-| Debian 13 trixie 6.12 | yes |
+| Debian 13 trixie 6.12 | yes, but broken (see below) |
 | Fedora | yes |
 | Ubuntu 24.04 generic 6.8 | no |
 | Proxmox VE kernels (6.17, 7.0) | no |
 | Alpine lts / virt | no |
 | Raspberry Pi OS 6.6 | no |
 
-So for a Debian guest, `damon_reclaim` is a module parameter away. Everywhere else, use `memory.reclaim`, or rebuild the kernel: for Alpine that turned out to be a Dockerfile and a six-line config fragment, described in the [image builder post]({{< ref "/post/alpine-image-builder#a-kernel-of-your-own" >}}).
+Having the config is not enough, though. On Debian 13 (6.12.115) `damon_reclaim` enables without complaint and does nothing: `bytes_reclaim_tried_regions` stays at 0 forever, while tracing `damon:damon_aggregated` shows regions that have been idle for half an hour. The bug is in `damon_reclaim_apply_parameters()`, which installs the scheme on the live context and then commits an empty parameter context over it:
+
+```c
+damon_set_schemes(ctx, &scheme, 1);        /* should be param_ctx */
+...
+err = damon_commit_ctx(ctx, param_ctx);    /* param_ctx has no scheme: it is destroyed */
+```
+
+6.17 and 6.18 build the scheme on `param_ctx`, and 6.12's `damon_lru_sort` already does. The sysfs setup above doesn't go through this code and works on 6.12. Kernels without `CONFIG_DAMON` have no sysfs interface either; there, use `memory.reclaim`, or rebuild the kernel: for Alpine that turned out to be a Dockerfile and a six-line config fragment, described in the [image builder post]({{< ref "/post/alpine-image-builder#a-kernel-of-your-own" >}}).
+
+## The Host Has the Same THP Problem, Worse
+
+Everything so far lives inside the guest. Then I built a Debian 13 VM with all of it applied — order 2, THP `madvise`, DAMON, the cache trim — and after one big compile it still held about 3 GiB on the host while the guest used ~450 MiB, and it stayed there with the VM idle. Reporting was negotiated and provably worked for freshly freed memory. The missing actor was on the host side.
+
+QEMU hard-codes the THP opt-in. Every RAM block is registered with a single unconditional call:
+
+```c
+/* system/physmem.c */
+qemu_madvise(new_block->host, new_block->max_length, QEMU_MADV_HUGEPAGE);
+```
+
+There is no option to turn this off. `-object memory-backend-ram,help` (and the memfd and file variants) on pve-qemu-kvm 11.1.3 list no `thp` property — I invented one, tried it, and was politely told `Invalid parameter 'thp'`. With the host in `madvise` mode this looks harmless, but `madvise` mode is exactly the mode that honors this opt-in: guest RAM gets 2 MiB pages at fault time and khugepaged collapses the rest. The huge share grows with churn: after a benchmark touched and freed 6 GiB three times, the kvm process showed 4.0 GiB of `AnonHugePages` inside 4.2 GiB of RSS.
+
+Huge pages defeat reporting at order 2. A 16 KiB report becomes a 16 KiB `MADV_DONTNEED` inside a 2 MiB page. The host kernel splits the PMD mapping, but the 2 MiB folio is now only partially mapped, so it goes on the deferred-split queue (`mm/rmap.c`). None of it is freed until the deferred-split shrinker runs, which only happens under host memory pressure. It is the same trap as THP `always` inside the guest, one layer down. A full-memory drain in the guest (allocate nearly everything, touch, free) returned its own pages but barely dented the huge-page mass.
+
+### Killing the opt-in
+
+Three ways, one of them surgical:
+
+- Host THP `never`: makes QEMU's opt-in a no-op, but globally, taking THP from every process on the machine.
+- A file-backed memory backend (`-object memory-backend-file,mem-path=/dev/shm/...`, `share=off`): works, because guest writes to a private file mapping become copy-on-write pages, which the fault path allocates at 4 KiB, and khugepaged treats a tmpfs-backed mapping by `shmem_enabled`, which is `never` by default. Costs an `args:` line and a file in `/dev/shm` that outlives the VM (QEMU only unlinks the temporary file it creates when `mem-path` is a directory). I measured it: same memory behavior as below, so it's a fine fallback.
+- Intercept the `madvise` call itself. QEMU calls it through libc like everyone else, so an `LD_PRELOAD` interposer sits in the path:
+
+```c
+/* nothp.c — gcc -shared -fPIC -O2 -o nothp.so nothp.c */
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <sys/mman.h>
+
+int madvise(void *addr, size_t len, int advice)
+{
+    if (advice == MADV_HUGEPAGE)
+        advice = MADV_NOHUGEPAGE;
+    static int (*real)(void *, size_t, int);
+    if (!real)
+        real = (int (*)(void *, size_t, int))dlsym(RTLD_NEXT, "madvise");
+    return real(addr, len, advice);
+}
+```
+
+Note the rewrite rather than dropping the call. An unflagged VMA inherits the system default, so if the host ever switches to THP `always`, khugepaged would silently resume collapsing guest RAM. `MADV_NOHUGEPAGE` is the only mode-proof opt-out, and costs one syscall per RAM block at startup.
+
+To inject it only into QEMU, wrap `/usr/bin/kvm` behind a dpkg diversion, so package upgrades don't overwrite it:
+
+```bash
+dpkg-divert --local --rename --add /usr/bin/kvm
+cat >/usr/bin/kvm <<'EOF'
+#!/bin/bash
+# nothp: rewrite QEMU's MADV_HUGEPAGE opt-in into an opt-out.
+export LD_PRELOAD=/usr/local/lib/nothp.so
+exec -a kvm /usr/bin/kvm.distrib "$@"
+EOF
+chmod 755 /usr/bin/kvm
+```
+
+That `exec -a kvm` is load-bearing. Proxmox does not pass `-accel`, so QEMU picks the default itself, and upstream QEMU (`system/vl.c`) uses `kvm:tcg` only when the program name ends in `kvm`. Any other name gets `tcg:kvm`, which means TCG is preferred. `/usr/bin/kvm` is a symlink to `qemu-system-x86_64`, so the name was the only thing selecting KVM. A wrapper that execs `kvm.distrib` naively silently gets TCG, and every VM dies at startup with a marvelously misleading error:
+
+```
+kvm.distrib: CPU model 'host' requires KVM or HVF
+```
+
+Nothing in that message points at argv[0], and `-accel help` through the wrapper still lists `kvm`, which sends you down entirely wrong paths. If you wrap the QEMU binary on PVE for any reason, keep the name.
+
+Results on the Debian 13 VM (12 GiB RAM, benchmark = 20M random touches across 6 GiB, three runs each):
+
+| Config | Benchmark | Host RSS after churn | `AnonHugePages` |
+|---|---|---|---|
+| stock anonymous RAM | 21.9 s | **4256 MiB** | 4144 MiB |
+| file-backed backend | 22.4 s | 680 MiB | 4 MiB |
+| kvm wrapper + anonymous RAM | 22.5 s | **699 MiB** | 0 |
+
+The wrapper keeps plain anonymous RAM and does as well as the file backend. Both pay about 2.7% on this TLB-bound benchmark, which is close to the worst case for losing huge pages. I did not benchmark a real workload.
+
+So what is in the remaining ~700 MiB? Not stranded free memory. `mm/page_reporting.c` has no per-zone "already reported" mark: any free of order ≥ `page_reporting_order` schedules a pass 2 seconds later. That pass walks every zone and every order from there up, and reports every free page not yet flagged `PageReported`. The source comment expects an idle system to be fully reported in about 30 seconds. The only free memory it can't see is blocks below the reporting order and the per-CPU free lists. Counting it all on the idle guest:
+
+| | MiB |
+|---|---|
+| reserved at boot, outside `MemTotal` (kernel image, firmware, and the `struct page` array: 64 bytes per 4 KiB page, ~190 MiB for 12 GiB) | 345 |
+| `MemTotal - MemFree` (page cache 129, anonymous 67, slab 54, other kernel memory) | 316 |
+| QEMU's own memory | ~50 |
+| **host RSS** | **713** |
+| free but not reportable (order 0–1 blocks, per-CPU lists), already inside the rows above | ~45 |
+
+Free page reporting is returning practically everything it can. The rest is memory the guest really uses, plus a fixed cost that scales with configured RAM: the `struct page` array alone is about 1.6% of it. Making the VM smaller, or lowering the page cache floor, are the only levers left.
 
 ## Bonus: Moving the Page Cache to the Host with virtio-pmem
 
@@ -243,9 +343,10 @@ If you want VMs on Proxmox VE to return memory like containers:
 1. **Never set `balloon: 0`** on Linux guests. That one line disables free page reporting, which PVE otherwise enables for you.
 2. **Set `page_reporting.page_reporting_order=2`** in the guest if your workloads free memory in small pieces. Measured: 600 MiB that was invisible to the host came back within 12 seconds.
 3. **Set THP to `madvise`** in the guest. With `always`, partial frees inside huge pages are not freed at all until memory pressure.
-4. **Trim page cache proactively**: `damon_reclaim` on Debian, or `memory.reclaim` on a timer elsewhere.
-5. Do not use `hugepages:` on those VMs, and accept that FreeBSD and Windows guests will not participate.
+4. **Reclaim idle memory proactively**: DAMON set up through sysfs where the kernel has it (Debian, or a rebuilt Alpine kernel), with no quota and watermarks 1000/1000/0; otherwise `memory.reclaim` on a timer. Not both: the size floor evicts cache that DAMON would keep.
+5. **Kill QEMU's host-side THP opt-in** with a small `LD_PRELOAD` wrapper around `/usr/bin/kvm` that rewrites `MADV_HUGEPAGE` to `MADV_NOHUGEPAGE`. QEMU hard-codes the opt-in, khugepaged collapses guest RAM otherwise, and partially discarded 2 MiB pages are not freed until host memory pressure. Measured: 4.2 GiB → 0.7 GiB of host RSS after churn, ~2.7% cost on a TLB-bound benchmark.
+6. Do not use `hugepages:` on those VMs, and accept that FreeBSD and Windows guests will not participate.
 
 That gets you within a few hundred MiB of a VM's real working set, with memory returning seconds after a process exits.
 
-For Alpine guests, points 2 to 4 are now a hook in my [image builder]({{< ref "/post/alpine-image-builder#hooks" >}}): add `66-vmmem` to `HOOKS` and the image boots with the reporting order at 2, THP in `madvise` mode, and a one-minute `memory.reclaim` job that keeps the page cache at a configurable floor. With the builder's DAMON-enabled kernel, `VMMEM_DAMON_RECLAIM=yes` adds point 4's time-based reclaim as well.
+For Alpine guests, points 2 to 4 are now a hook in my [image builder]({{< ref "/post/alpine-image-builder#hooks" >}}): add `66-vmmem` to `HOOKS` and the image boots with the reporting order at 2, THP in `madvise` mode, and a one-minute `memory.reclaim` job that keeps the page cache at a configurable floor. With the builder's DAMON-enabled kernel, `VMMEM_DAMON_RECLAIM=yes` replaces the trim with the sysfs DAMON setup above.

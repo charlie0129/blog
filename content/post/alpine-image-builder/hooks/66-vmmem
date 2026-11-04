@@ -17,10 +17,13 @@
 #     on a deferred-split queue until memory pressure, so from the host's point
 #     of view nothing was freed at all. "madvise" avoids that.
 #   - Page cache is never free, so it is never reported, and a guest with
-#     headroom has no pressure that would ever evict it. A cron job asks the
+#     headroom has no pressure that would ever evict it. Either DAMON pages
+#     out what has not been touched for a while (VMMEM_DAMON_RECLAIM=yes,
+#     which needs the kernel from build-kernel.sh), or a cron job asks the
 #     kernel for ordinary LRU reclaim of the cache above a floor, through the
 #     root cgroup's memory.reclaim, which needs the one cgroup v2 tree that
-#     65-cgroups mounts.
+#     65-cgroups mounts. Not both by default: the floor would evict cache
+#     that is in use, which DAMON keeps.
 #
 # The first two are kernel knobs that could go on the cmdline, but GRUB is
 # installed before the hooks run, so a service sets them at boot instead; the
@@ -66,12 +69,6 @@ case "$VMMEM_DAMON_MIN_AGE" in
 	exit 1
 	;;
 esac
-case "$VMMEM_DAMON_QUOTA_MS" in
-'' | 0 | *[!0-9]*)
-	echo "66-vmmem: VMMEM_DAMON_QUOTA_MS must be a number of milliseconds, not '$VMMEM_DAMON_QUOTA_MS'" >&2
-	exit 1
-	;;
-esac
 
 # DAMON is not in any stock Alpine kernel, so asking for it only makes sense
 # with a kernel from build-kernel.sh (KERNEL_REPO_DIR).  Checked here, where
@@ -80,10 +77,15 @@ if [ "$VMMEM_DAMON_RECLAIM" = yes ]; then
 	case "$KERNEL_PKG" in
 	*=*) ;;
 	*)
-		echo "66-vmmem: VMMEM_DAMON_RECLAIM=yes needs a kernel with CONFIG_DAMON_RECLAIM; set KERNEL_REPO_DIR to the output of build-kernel.sh" >&2
+		echo "66-vmmem: VMMEM_DAMON_RECLAIM=yes needs a kernel with CONFIG_DAMON_SYSFS; set KERNEL_REPO_DIR to the output of build-kernel.sh" >&2
 		exit 1
 		;;
 	esac
+	# An explicit floor wins (mkalpine.sh defaults it to 0 with DAMON), but
+	# say what it costs.
+	if [ "$VMMEM_CACHE_KEEP" != 0 ]; then
+		echo "66-vmmem: warning: VMMEM_CACHE_KEEP=$VMMEM_CACHE_KEEP with VMMEM_DAMON_RECLAIM=yes: the trim evicts page cache above the floor even while it is in use, which DAMON would keep" >&2
+	fi
 fi
 
 # What the boot service applies. A conf.d file rather than values baked into
@@ -101,13 +103,12 @@ reporting_order="$VMMEM_REPORTING_ORDER"
 thp="$VMMEM_THP"
 
 # DAMON-based proactive reclaim (yes/no): page out memory nobody has touched
-# for damon_min_age seconds, spending at most damon_quota_ms of CPU per second
-# on it. Needs CONFIG_DAMON_RECLAIM, which only a kernel from build-kernel.sh
-# has. The service also raises damon_reclaim's watermarks so it stays active
-# while memory is plentiful; stock, it only works between 20% and 50% free.
+# for damon_min_age seconds. Anonymous memory goes to swap if there is any (40-zram), otherwise
+# only page cache is reclaimed. Set up through the DAMON sysfs interface
+# (CONFIG_DAMON_SYSFS, only in a kernel from build-kernel.sh), on at every
+# free memory level and over every System RAM range; see /etc/init.d/vmmem.
 damon_reclaim="$VMMEM_DAMON_RECLAIM"
 damon_min_age="$VMMEM_DAMON_MIN_AGE"
-damon_quota_ms="$VMMEM_DAMON_QUOTA_MS"
 EOF
 
 cat >/etc/conf.d/vmmem-trim <<EOF
